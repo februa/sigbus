@@ -407,32 +407,30 @@ class Pipeline:
             'spectrum': StateSpec('spectrum', (), np.dtype([
                 ('samples', 'i8'), ('power', 'f8', (config.directions,))])),
         }
-        # Completion dependencies are wired here, not discovered inside Modules.
-        signal = Signal(self.bus, self.specs, config)
-        position = Position(self.bus, self.specs, config)
-        sound = Sound(self.bus, self.specs, config, signal_done=signal.done)
-        steering = Steering(self.bus, self.specs, config, sound_done=sound.done)
-        covariance = Covariance(self.bus, self.specs, config)
-        weights = Weights(self.bus, self.specs, config,
-                          covariance_done=covariance.done, steering_done=steering.done)
-        beam = Beam(self.bus, self.specs, config)
-        spectrum = Spectrum(self.bus, self.specs, config)
-        display = Display(self.bus, self.specs, config, spectrum_done=spectrum.done)
-        self.modules = dict(position=position, sound=sound, steering=steering,
-                            signal=signal, covariance=covariance, weights=weights,
-                            beam=beam, spectrum=spectrum, display=display)
+        # name: (Module class, rate_hz, completion-argument -> producer name).
+        # Producers precede their completion dependents for construction only;
+        # every Stage still runs concurrently and connects data in initialize().
+        definitions = {
+            'signal': (Signal, config.signal_hz, {}),
+            'position': (Position, 1 / config.poll_interval, {}),
+            'sound': (Sound, config.sound_hz, {'signal_done': 'signal'}),
+            'steering': (Steering, config.sound_hz, {'sound_done': 'sound'}),
+            'covariance': (Covariance, 1 / config.poll_interval, {}),
+            'weights': (Weights, config.weights_hz,
+                        {'covariance_done': 'covariance', 'steering_done': 'steering'}),
+            'beam': (Beam, 1 / config.poll_interval, {}),
+            'spectrum': (Spectrum, 1 / config.poll_interval, {}),
+            'display': (Display, 1 / config.display_interval, {'spectrum_done': 'spectrum'}),
+        }
+        self.modules = {}
+        for name, (module_type, _, dependencies) in definitions.items():
+            completion = {argument: self.modules[producer].done
+                          for argument, producer in dependencies.items()}
+            self.modules[name] = module_type(self.bus, self.specs, config, **completion)
 
-        # One Module per concurrent Stage; data connections remain in initialize().
         self.worker = Worker([
-            Stage('position', [ModuleSpec('position', position)], Periodic(1 / config.poll_interval)),
-            Stage('sound', [ModuleSpec('sound', sound)], Periodic(config.sound_hz)),
-            Stage('steering', [ModuleSpec('steering', steering)], Periodic(config.sound_hz)),
-            Stage('signal', [ModuleSpec('signal', signal)], Periodic(config.signal_hz)),
-            Stage('covariance', [ModuleSpec('covariance', covariance)], Periodic(1 / config.poll_interval)),
-            Stage('weights', [ModuleSpec('weights', weights)], Periodic(config.weights_hz)),
-            Stage('beam', [ModuleSpec('beam', beam)], Periodic(1 / config.poll_interval)),
-            Stage('spectrum', [ModuleSpec('spectrum', spectrum)], Periodic(1 / config.poll_interval)),
-            Stage('display', [ModuleSpec('display', display)], Periodic(1 / config.display_interval)),
+            Stage(name, [ModuleSpec(name, self.modules[name])], Periodic(rate_hz))
+            for name, (_, rate_hz, _) in definitions.items()
         ])
 
     def run(self):
