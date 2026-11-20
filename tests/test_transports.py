@@ -21,7 +21,7 @@ def make_transport(kind, root, slots=3):
 @pytest.fixture(params=["inprocess", "file", "shared_memory"])
 def domain(request, tmp_path):
     transport = make_transport(request.param, tmp_path)
-    spec = StreamSpec("signal", (8,), np.float64)
+    spec = StreamSpec("signal", (8,), np.float64, rate_hz=100)
     yield transport, spec
     # Tests close their endpoints; persistent data is removed explicitly.
     if request.param != "inprocess":
@@ -135,12 +135,12 @@ def test_close_while_active_and_nested_acquire(domain):
 def test_spec_conflict_and_domain_isolation(domain):
     transport, spec = domain
     pub = Bus(transport, policy=LatestPolicy()).publisher(spec)
-    for other in (StreamSpec(spec.name, (4,), np.float64), StreamSpec(spec.name, (8,), np.int64)):
+    for other in (StreamSpec(spec.name, (4,), np.float64, rate_hz=100), StreamSpec(spec.name, (8,), np.int64, rate_hz=100)):
         with pytest.raises(ValueError):
             Bus(transport, policy=LatestPolicy()).subscriber(other)
     with pytest.raises(ValueError):
         transport.open_stream(spec, "invalid")
-    second = StreamSpec("other", (8,), np.float64)
+    second = StreamSpec("other", (8,), np.float64, rate_hz=100)
     sub = Bus(transport, policy=LatestPolicy()).subscriber(second)
     publish(pub, 1, 1)
     with pytest.raises(BlockingIOError):
@@ -171,7 +171,7 @@ def test_zero_copy_and_multiple_reader_pins(domain):
 
 @pytest.mark.parametrize("kind", ["file", "shared_memory"])
 def test_reopen_and_independent_instances(kind, tmp_path):
-    spec = StreamSpec("signal" if kind == "file" else "a/../signal", (3,), np.int32)
+    spec = StreamSpec("signal" if kind == "file" else "a/../signal", (3,), np.int32, rate_hz=100)
     first = make_transport(kind, tmp_path)
     pub = Bus(first, policy=LatestPolicy()).publisher(spec)
     publish(pub, 11, [3, 4, 5])
@@ -196,7 +196,7 @@ def test_reopen_and_independent_instances(kind, tmp_path):
 
 def child_reader(kind, root, conn):
     transport = make_transport(kind, root)
-    spec = StreamSpec("cross-process", (128,), np.float64)
+    spec = StreamSpec("cross-process", (128,), np.float64, rate_hz=100)
     sub = Bus(transport, policy=LatestPolicy()).subscriber(spec)
     with sub.acquire() as frame:
         conn.send((frame.timestamp, bool(np.all(frame.payload == 1))))
@@ -210,7 +210,7 @@ def child_reader(kind, root, conn):
 @pytest.mark.parametrize("kind", ["file", "shared_memory"])
 def test_spawn_reader_holds_frame_during_parent_writes(kind, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec("cross-process", (128,), np.float64)
+    spec = StreamSpec("cross-process", (128,), np.float64, rate_hz=100)
     pub = Bus(transport, policy=LatestPolicy()).publisher(spec)
     publish(pub, 1, 1)
     ctx = mp.get_context("spawn")
@@ -240,14 +240,14 @@ def test_spawn_reader_holds_frame_during_parent_writes(kind, tmp_path):
 
 def test_unrelated_shared_memory_process_exit_preserves_segment(tmp_path):
     transport = make_transport("shared_memory", tmp_path)
-    spec = StreamSpec("signal", (8,), np.float64)
+    spec = StreamSpec("signal", (8,), np.float64, rate_hz=100)
     pub = Bus(transport, policy=LatestPolicy()).publisher(spec)
     code = '''
 import sys
 import numpy as np
 from sigbus import LatestPolicy, Bus, SharedMemoryTransport, StreamSpec
 t = SharedMemoryTransport("tests", directory=sys.argv[1])
-p = Bus(t, policy=LatestPolicy()).publisher(StreamSpec("signal", (8,), np.float64))
+p = Bus(t, policy=LatestPolicy()).publisher(StreamSpec("signal", (8,), np.float64, rate_hz=100))
 with p.acquire(9) as f:
     f.payload[:] = 9
 p.close()
@@ -271,7 +271,7 @@ t.close()
 @pytest.mark.parametrize("shape,dtype", [((), "float32"), ((2, 3), ">i4"),
                                          ((2,), np.dtype([("x", "f8"), ("v", "i4", (2,))]))])
 def test_numpy_shapes_and_dtypes(kind, shape, dtype, tmp_path):
-    spec = StreamSpec("numpy", shape, dtype)
+    spec = StreamSpec("numpy", shape, dtype, rate_hz=100)
     transport = make_transport(kind, tmp_path)
     pub, sub = Bus(transport, policy=LatestPolicy()).publisher(spec), Bus(transport, policy=LatestPolicy()).subscriber(spec)
     expected = np.ones(shape, dtype)
@@ -296,7 +296,7 @@ def test_numpy_shapes_and_dtypes(kind, shape, dtype, tmp_path):
 
 def test_threaded_publishers_are_atomic():
     transport = InProcessTransport(slots=8)
-    spec = StreamSpec("threads", (1024,), np.int64)
+    spec = StreamSpec("threads", (1024,), np.int64, rate_hz=100)
     publishers = [Bus(transport, policy=LatestPolicy()).publisher(spec) for _ in range(4)]
     sub = Bus(transport, policy=LatestPolicy()).subscriber(spec)
 
@@ -328,7 +328,7 @@ def test_invalid_spec(kwargs):
     fields = dict(name="x", shape=(2,), dtype="f8")
     fields.update(kwargs)
     with pytest.raises(ValueError):
-        StreamSpec(**fields)
+        StreamSpec(**fields, rate_hz=100)
 
 
 def test_public_exports_and_slot_validation():
@@ -341,12 +341,12 @@ def test_public_exports_and_slot_validation():
     transport.close()
     transport.close()
     with pytest.raises(RuntimeError):
-        Bus(transport, policy=LatestPolicy()).publisher(StreamSpec("x", (2,), "f8"))
+        Bus(transport, policy=LatestPolicy()).publisher(StreamSpec("x", (2,), "f8", rate_hz=100))
 
 
 def child_writer(kind, root, number, conn):
     transport = make_transport(kind, root, slots=6)
-    spec = StreamSpec("parallel", (2048,), np.int64)
+    spec = StreamSpec("parallel", (2048,), np.int64, rate_hz=100)
     pub = Bus(transport, policy=LatestPolicy()).publisher(spec)
     conn.send("ready")
     conn.recv()
@@ -365,7 +365,7 @@ def test_concurrent_process_writers(kind, tmp_path):
     import json
 
     transport = make_transport(kind, tmp_path, slots=6)
-    spec = StreamSpec("parallel", (2048,), np.int64)
+    spec = StreamSpec("parallel", (2048,), np.int64, rate_hz=100)
     sub = Bus(transport, policy=LatestPolicy()).subscriber(spec)
     ctx = mp.get_context("spawn")
     processes, connections = [], []
@@ -418,7 +418,7 @@ def test_concurrent_process_writers(kind, tmp_path):
 def test_file_format_generations_and_numpy_compatibility(tmp_path):
     import json
 
-    spec = StreamSpec("saved", (4,), np.float32)
+    spec = StreamSpec("saved", (4,), np.float32, rate_hz=100)
     transport = FileTransport(tmp_path)
     pub = Bus(transport, policy=LatestPolicy()).publisher(spec)
     for generation in range(10):

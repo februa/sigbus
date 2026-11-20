@@ -1,6 +1,5 @@
-from .inprocess.adapter import InProcessTransport, InProcessAdapter
-from .shared_memory.adapter import SharedMemoryTransport, SharedMemoryAdapter
-from .file.adapter import FileTransport, FileAdapter
+from .inprocess.adapter import InProcessTransport
+from .shared_memory.adapter import SharedMemoryTransport
+from .file.adapter import FileTransport
 
-__all__ = ["InProcessTransport", "InProcessAdapter", "SharedMemoryTransport",
-           "SharedMemoryAdapter", "FileTransport", "FileAdapter"]
+__all__ = ["InProcessTransport", "SharedMemoryTransport", "FileTransport"]

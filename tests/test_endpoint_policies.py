@@ -14,7 +14,7 @@ from test_transports import make_transport, publish
 @pytest.fixture(params=['inprocess', 'file', 'shared_memory'])
 def mixed(request, tmp_path):
     transport = make_transport(request.param, tmp_path, 3)
-    spec = StreamSpec('mixed', (8,), 'f8')
+    spec = StreamSpec('mixed', (8,), 'f8', rate_hz=100)
     yield transport, spec
     transport.remove(spec, force=True)
     transport.close()
@@ -180,7 +180,7 @@ def test_exclusion_preserves_active_lease_and_requires_rejoin(mixed, policy):
 
 def test_exclusion_never_steals_single_slot(tmp_path):
     t = make_transport('inprocess', tmp_path, 1)
-    spec = StreamSpec('single', (8,), 'f8')
+    spec = StreamSpec('single', (8,), 'f8', rate_hz=100)
     bus = Bus(t)
     pub = bus.publisher(spec, policy=SyncPolicy())
     sub = bus.subscriber(spec, policy=SyncPolicy(ack=AckSettings()))
@@ -214,7 +214,7 @@ def test_timeout_raise_preserves_obligations(mixed):
 
 def test_expired_writer_partial_is_reclaimed_but_active_is_pinned(mixed):
     transport, _ = mixed
-    spec = StreamSpec('partial', (8,), 'f8', batch_size=2)
+    spec = StreamSpec('partial', (8,), 'f8', batch_size=2, rate_hz=100)
     bus = Bus(transport)
     a = bus.publisher(spec, policy=FIFOPolicy(ack=AckSettings()))
     b = bus.publisher(spec)
@@ -235,7 +235,7 @@ def test_expired_writer_partial_is_reclaimed_but_active_is_pinned(mixed):
 
 def test_sync_batch_waits_until_last_return(mixed):
     transport, _ = mixed
-    spec = StreamSpec('batch-sync', (8,), 'f8', batch_size=2)
+    spec = StreamSpec('batch-sync', (8,), 'f8', batch_size=2, rate_hz=100)
     bus = Bus(transport)
     pub = bus.publisher(spec, policy=SyncPolicy())
     sub = bus.subscriber(spec, policy=SyncPolicy())
@@ -259,7 +259,7 @@ def test_sync_batch_waits_until_last_return(mixed):
 
 def process_member(kind, root, conn):
     t = make_transport(kind, root)
-    spec = StreamSpec('process-sync', (8,), 'f8')
+    spec = StreamSpec('process-sync', (8,), 'f8', rate_hz=100)
     sub = Bus(t).subscriber(spec, policy=SyncPolicy(ack=AckSettings(interval=.02, timeout=1)))
     conn.send('joined')
     conn.recv()
@@ -275,7 +275,7 @@ def process_member(kind, root, conn):
 @pytest.mark.parametrize('kind', ['file', 'shared_memory'])
 def test_cross_process_sync_ack_and_return(kind, tmp_path):
     t = make_transport(kind, tmp_path)
-    spec = StreamSpec('process-sync', (8,), 'f8')
+    spec = StreamSpec('process-sync', (8,), 'f8', rate_hz=100)
     pub = Bus(t).publisher(spec, policy=SyncPolicy())
     ctx = mp.get_context('spawn')
     parent, child = ctx.Pipe()
@@ -389,7 +389,7 @@ def test_ack_worker_error_is_surfaced_and_shutdown(mixed):
 @pytest.mark.parametrize('kind', ['file', 'shared_memory'])
 def test_dead_process_excluded_without_revoking_lease(kind, tmp_path):
     t = make_transport(kind, tmp_path)
-    spec = StreamSpec('process-sync', (8,), 'f8')
+    spec = StreamSpec('process-sync', (8,), 'f8', rate_hz=100)
     pub = Bus(t).publisher(spec, policy=SyncPolicy())
     ctx = mp.get_context('spawn')
     parent, child = ctx.Pipe()
@@ -485,7 +485,7 @@ def test_excluded_sync_writer_does_not_block_other_free_slots(mixed):
 def test_version_five_requires_explicit_migration(kind, tmp_path):
     import json
     t = make_transport(kind, tmp_path)
-    spec = StreamSpec('old-format', (8,), 'f8')
+    spec = StreamSpec('old-format', (8,), 'f8', rate_hz=100)
     pub = Bus(t).publisher(spec)
     pub.close()
     path = t._stream_directory(spec.name) / 'metadata.json'

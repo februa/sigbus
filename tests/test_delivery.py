@@ -3,7 +3,7 @@ from threading import Event
 
 import pytest
 
-from sigbus import ReadCompletePolicy, LatestPolicy, Bus, ImmediateWait, PollingWait, StreamSpec
+from sigbus import SyncPolicy, LatestPolicy, Bus, ImmediateWait, PollingWait, StreamSpec
 from test_transports import make_transport, publish
 
 
@@ -12,16 +12,16 @@ from test_transports import make_transport, publish
 def delivery(request, tmp_path):
     kind, slots = request.param
     transport = make_transport(kind, tmp_path, slots)
-    spec = StreamSpec('delivery', (8,), 'f8')
+    spec = StreamSpec('delivery', (8,), 'f8', rate_hz=100)
     yield transport, spec
     if kind != 'inprocess':
         transport.remove(spec)
     transport.close()
 
 
-def test_all_readers_late_join_exception_and_close(delivery):
+def test_sync_late_join_exception_and_close(delivery):
     transport, spec = delivery
-    bus = Bus(transport, policy=ReadCompletePolicy())
+    bus = Bus(transport, policy=SyncPolicy())
     pub, first = bus.publisher(spec), bus.subscriber(spec)
     publish(pub, 1, 1)
     with pytest.raises(BlockingIOError):
@@ -32,9 +32,8 @@ def test_all_readers_late_join_exception_and_close(delivery):
                 first.close()
             raise KeyboardInterrupt
     late = bus.subscriber(spec)
-    with pytest.raises(BlockingIOError):
-        publish(pub, 2, 2)
-    late.close()  # Unread subscriber leaves the waiting set.
+    assert not late.has_frame()  # Sync joins future publications only.
+    late.close()
     publish(pub, 2, 2)
     with first.acquire() as frame:
         assert frame.timestamp == 2
@@ -59,7 +58,7 @@ def test_all_readers_late_join_exception_and_close(delivery):
 
 def test_no_readers_wait_and_abort(delivery):
     transport, spec = delivery
-    bus = Bus(transport, policy=ReadCompletePolicy(wait=PollingWait(timeout=0), no_readers='wait'))
+    bus = Bus(transport, policy=SyncPolicy(wait=PollingWait(timeout=0), no_readers='wait'))
     pub = bus.publisher(spec)
     with pytest.raises(TimeoutError):
         publish(pub, 1, 1)
@@ -79,8 +78,7 @@ def test_no_readers_wait_and_abort(delivery):
     with pytest.raises(TimeoutError):
         publish(pub, 4, 4)
     late = bus.subscriber(spec)
-    with late.acquire() as frame:
-        assert frame.timestamp == 3
+    assert not late.has_frame()
     publish(pub, 4, 4)
     late.close()
     pub.close()
@@ -88,7 +86,7 @@ def test_no_readers_wait_and_abort(delivery):
 
 def test_polling_unblocks_on_close(delivery):
     transport, spec = delivery
-    bus = Bus(transport, policy=ReadCompletePolicy(wait=PollingWait(timeout=2)))
+    bus = Bus(transport, policy=SyncPolicy(wait=PollingWait(timeout=2)))
     pub, sub = bus.publisher(spec), bus.subscriber(spec)
     publish(pub, 1, 1)
     attempted = Event()
@@ -109,7 +107,7 @@ def test_polling_unblocks_on_close(delivery):
 
 def test_policy_conflict(delivery):
     transport, spec = delivery
-    bus = Bus(transport, policy=ReadCompletePolicy())
+    bus = Bus(transport, policy=SyncPolicy())
     pub = bus.publisher(spec)
     with pytest.raises(ValueError):
         Bus(transport).publisher(spec)
@@ -120,7 +118,7 @@ def test_policy_conflict(delivery):
 
 def test_no_reader_rule_independent(tmp_path):
     transport = make_transport('inprocess', tmp_path)
-    spec = StreamSpec('independent', (8,), 'f8')
+    spec = StreamSpec('independent', (8,), 'f8', rate_hz=100)
     bus = Bus(transport, policy=LatestPolicy(no_readers='wait'))
     pub = bus.publisher(spec)
     with pytest.raises(BlockingIOError):
@@ -137,8 +135,8 @@ def test_no_reader_rule_independent(tmp_path):
 
 def process_reader(kind, root, conn):
     transport = make_transport(kind, root, 1)
-    spec = StreamSpec('process', (8,), 'f8')
-    sub = Bus(transport, policy=ReadCompletePolicy()).subscriber(spec)
+    spec = StreamSpec('process', (8,), 'f8', rate_hz=100)
+    sub = Bus(transport, policy=SyncPolicy()).subscriber(spec)
     conn.send('joined')
     conn.recv()
     try:
@@ -160,10 +158,9 @@ def test_process_reader_return_and_reopen(kind, tmp_path):
     import multiprocessing as mp
 
     transport = make_transport(kind, tmp_path, 1)
-    spec = StreamSpec('process', (8,), 'f8')
-    policy = ReadCompletePolicy()
+    spec = StreamSpec('process', (8,), 'f8', rate_hz=100)
+    policy = SyncPolicy()
     pub = Bus(transport, policy=policy).publisher(spec)
-    publish(pub, 1, 1)
     ctx = mp.get_context('spawn')
     parent, child = ctx.Pipe()
     process = ctx.Process(target=process_reader, args=(kind, str(tmp_path), child))
@@ -172,6 +169,7 @@ def test_process_reader_return_and_reopen(kind, tmp_path):
     try:
         assert parent.poll(10)
         assert parent.recv() == 'joined'
+        publish(pub, 1, 1)
         with pytest.raises(BlockingIOError):
             publish(pub, 2, 2)
         parent.send('read')
@@ -195,11 +193,10 @@ def test_process_reader_return_and_reopen(kind, tmp_path):
     transport = make_transport(kind, tmp_path, 1)
     sub = Bus(transport, policy=policy).subscriber(spec)
     pub = Bus(transport, policy=policy).publisher(spec)
-    with pytest.raises(BlockingIOError):
-        publish(pub, 3, 3)
-    with sub.acquire() as frame:
-        assert frame.timestamp == 2
+    assert not sub.has_frame()
     publish(pub, 3, 3)
+    with sub.acquire() as frame:
+        assert frame.timestamp == 3
     sub.close()
     pub.close()
     transport.remove(spec)

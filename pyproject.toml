@@ -4,8 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sigbus"
-version = "1.0.0"
+version = "2.0.0"
 description = "NumPy frame publication over in-process, shared-memory and file transports"
+readme = "README.md"
 requires-python = ">=3.13"
 dependencies = ["numpy>=2.1"]
 
@@ -16,4 +17,4 @@ test = ["pytest>=8"]
 include = ["sigbus*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "examples/beamforming"]

@@ -1,3 +1,3 @@
-from .adapter import SharedMemoryTransport, SharedMemoryAdapter
+from .adapter import SharedMemoryTransport
 
-__all__ = ["SharedMemoryTransport", "SharedMemoryAdapter"]
+__all__ = ["SharedMemoryTransport"]

@@ -2,14 +2,14 @@ import multiprocessing as mp
 import numpy as np
 import pytest
 
-from sigbus import Bus, FIFOPolicy, LatestPolicy, ReadCompletePolicy, StreamSpec
+from sigbus import Bus, FIFOPolicy, LatestPolicy, SyncPolicy, StreamSpec
 from test_transports import make_transport
 
 
 @pytest.fixture(params=['inprocess', 'file', 'shared_memory'])
 def batch(request, tmp_path):
     transport = make_transport(request.param, tmp_path, 3)
-    spec = StreamSpec('batch', (2, 3), 'f4', batch_size=4)
+    spec = StreamSpec('batch', (2, 3), 'f4', batch_size=4, rate_hz=100)
     yield transport, spec
     if request.param != 'inprocess':
         transport.remove(spec)
@@ -105,7 +105,7 @@ def test_aborted_item_is_retried_without_losing_prefix(batch):
     sub.close()
 
 
-@pytest.mark.parametrize('policy', [FIFOPolicy(overflow='block'), ReadCompletePolicy()])
+@pytest.mark.parametrize('policy', [FIFOPolicy(overflow='block')])
 def test_independent_read_positions_and_late_join(batch, policy):
     transport, spec = batch
     bus = Bus(transport, policy=policy)
@@ -118,9 +118,6 @@ def test_independent_read_positions_and_late_join(batch, policy):
         for i in range(4):
             take(sub, i)
         sub.close()
-    if isinstance(policy, ReadCompletePolicy):
-        with pytest.raises(BlockingIOError):
-            put(pub, 4)
     with pytest.raises(ValueError):
         with a.acquire() as frame:
             assert frame.timestamp == 1
@@ -173,7 +170,7 @@ def test_drop_whole_batches_but_preserve_leased_slot(batch):
     ((2,), np.dtype([('x', 'f4'), ('y', 'i4', (2,))]))])
 def test_shapes_dtypes_and_reopen(kind, shape, dtype, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('array', shape, dtype, batch_size=3)
+    spec = StreamSpec('array', shape, dtype, batch_size=3, rate_hz=100)
     pub = Bus(transport).publisher(spec)
     expected = np.ones(shape, dtype)
     for i in range(2):
@@ -201,7 +198,7 @@ def test_shapes_dtypes_and_reopen(kind, shape, dtype, tmp_path):
 
 def batch_child(kind, root, conn):
     transport = make_transport(kind, root)
-    spec = StreamSpec('ipc-batch', (2, 3), 'f4', batch_size=4)
+    spec = StreamSpec('ipc-batch', (2, 3), 'f4', batch_size=4, rate_hz=100)
     sub = Bus(transport).subscriber(spec)
     conn.send('joined')
     conn.recv()
@@ -220,7 +217,7 @@ def batch_child(kind, root, conn):
 @pytest.mark.parametrize('kind', ['file', 'shared_memory'])
 def test_cross_process_batch_flush(kind, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('ipc-batch', (2, 3), 'f4', batch_size=4)
+    spec = StreamSpec('ipc-batch', (2, 3), 'f4', batch_size=4, rate_hz=100)
     pub = Bus(transport).publisher(spec)
     ctx = mp.get_context('spawn')
     parent, child = ctx.Pipe()
@@ -283,7 +280,7 @@ def test_acquire_batch_concat_axes_and_remaining(batch):
     sub.close()
 
 
-@pytest.mark.parametrize('policy', [FIFOPolicy(), ReadCompletePolicy(), LatestPolicy()])
+@pytest.mark.parametrize('policy', [FIFOPolicy(), SyncPolicy(), LatestPolicy()])
 def test_batch_partial_exception_and_independent_readers(batch, policy):
     transport, spec = batch
     bus = Bus(transport, policy=policy)
@@ -332,7 +329,7 @@ def test_batch_lease_protects_whole_slot(batch):
 @pytest.mark.parametrize('shape', [(512,), ()])
 def test_batch_vector_and_scalar(kind, shape, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('batch-shape', shape, 'f4', batch_size=2)
+    spec = StreamSpec('batch-shape', shape, 'f4', batch_size=2, rate_hz=100)
     bus = Bus(transport)
     pub, sub = bus.publisher(spec), bus.subscriber(spec)
     for i in range(2):

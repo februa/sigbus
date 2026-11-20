@@ -1,4 +1,5 @@
 from threading import Event, Thread
+from ..storage import PendingSend, Reservation
 
 
 class _Endpoint:
@@ -33,6 +34,31 @@ class _Endpoint:
     def ack(self):
         self._check()
         self._storage.ack(self._endpoint_id)
+
+    @property
+    def spec(self):
+        return self._storage.spec
+
+    def reserve(self, timestamp=None, *, batch=False):
+        self._check()
+        return Reservation(self._storage, self._endpoint_id, timestamp, batch=batch)
+
+    def check_idle(self):
+        self._check()
+        with self._storage.transaction(read_only=True) as state:
+            saved = self._storage._endpoint(state, self._endpoint_id)
+            if saved["active"] or saved["waiting_write"] or saved["buffer"] is not None:
+                raise RuntimeError("endpoint must be idle before registration")
+
+    def queue_pending(self):
+        self._check()
+        slot = self._storage.queue_pending(self._endpoint_id)
+        if slot is None:
+            return None
+        return PendingSend(self._storage, self._endpoint_id, slot)
+
+    def discard_pending(self):
+        self._storage.discard_pending(self._endpoint_id)
 
     def close(self):
         # A rejected close during a lease must leave the ACK worker running.

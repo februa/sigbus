@@ -31,3 +31,7 @@ class ParticipantExcludedError(RuntimeError):
 
 class AckTimeoutError(TimeoutError):
     """A participant expired with on_timeout='raise'; its obligations remain."""
+
+
+class NodeSendError(RuntimeError):
+    """A Node cannot continue publication; the original error is __cause__."""

@@ -89,7 +89,7 @@ class PersistentStorage(StreamStorage):
             if state["identity"] != self.identity:
                 self.removed = True
                 raise StreamRemovedError(f"Stream {self.spec.name!r}: access: stream was replaced")
-            if state["version"] != 7:
+            if state["version"] != 8:
                 raise StreamCorruptedError(f"Stream {self.spec.name!r}: access: storage format changed")
             # Detect missing/truncated mapped files before constructing or reading views.
             if self.kind == "file":

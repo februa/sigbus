@@ -8,7 +8,7 @@ from sigbus import Bus, SharedMemoryTransport, StreamSpec
 
 def test_force_reclaims_old_version_and_stale_endpoints(tmp_path):
     transport = SharedMemoryTransport('cleanup', directory=tmp_path)
-    spec = StreamSpec('audio', (2,), 'f4')
+    spec = StreamSpec('audio', (2,), 'f4', rate_hz=100)
     pub = Bus(transport).publisher(spec)
     pub.close()
     path = next(transport.directory.glob('*/metadata.json'))
@@ -33,7 +33,7 @@ def test_force_reclaims_old_version_and_stale_endpoints(tmp_path):
 
 def test_force_with_spec_and_missing_segment(tmp_path):
     transport = SharedMemoryTransport('cleanup', directory=tmp_path)
-    spec = StreamSpec('audio', (2,), 'f4')
+    spec = StreamSpec('audio', (2,), 'f4', rate_hz=100)
     pub = Bus(transport).publisher(spec)
     pub.close()
     path = next(transport.directory.glob('*/metadata.json'))
@@ -50,7 +50,7 @@ def test_force_with_spec_and_missing_segment(tmp_path):
 def test_normal_guard_and_target_isolation(tmp_path):
     first = SharedMemoryTransport('first', directory=tmp_path)
     second = SharedMemoryTransport('second', directory=tmp_path)
-    spec = StreamSpec('audio', (2,), 'f4')
+    spec = StreamSpec('audio', (2,), 'f4', rate_hz=100)
     a = Bus(first).publisher(spec)
     b = Bus(second).publisher(spec)
     with pytest.raises(RuntimeError):

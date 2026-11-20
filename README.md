@@ -1,8 +1,8 @@
-# SigBus v1.0
+# SigBus v2.0
 
 同じCore APIからNumPy FrameをInProcess・SharedMemory・Fileで配信します。
 **既定は満杯時に最古の非リースFrameを破棄するFIFO配信です。slotsは保持容量です。**
-Bus/Publisher/Subscriberの既存メソッドとFrame(timestamp, payload)の生成方法は維持しています。
+v2.0ではStreamSpecのrate_hzが必須です。[移行手順](docs/migration-v2.md)と[変更履歴](CHANGELOG.md)を参照してください。
 状態公開にはStateSpec、データごとの容量指定にはSpecのslotsを使えます。
 
 ## セットアップ
@@ -15,6 +15,17 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
+## WorkerとModule
+
+処理と資源管理は`sigbus.module.Module`、実行制御は`sigbus.worker.Worker`に分けています。
+どちらもSigBus本体に含まれ、別パッケージのインストールは不要です。
+詳しくは[WorkerとModule](docs/worker.md)を参照してください。
+
+```python
+from sigbus.module import Module
+from sigbus.worker import Worker, Stage, ModuleSpec, Periodic, RunResult
+```
+
 ## 基本使用例
 
 ```python
@@ -23,7 +34,7 @@ from sigbus import Bus, StreamSpec, InProcessTransport
 
 transport = InProcessTransport(slots=10)
 bus = Bus(transport)  # FIFOPolicy() と同じ
-spec = StreamSpec('audio', (1024,), np.float32)
+spec = StreamSpec('audio', (1024,), np.float32, rate_hz=100)
 publisher = bus.publisher(spec)
 subscriber = bus.subscriber(spec)
 try:
@@ -45,12 +56,12 @@ subscriber.acquire()は各Subscriberの未読を取得し、正常・例外を�
 
 ## ストリームと状態をSpecで区別する
 
-- `StreamSpec(..., slots=None)` は従来のストリームです。slots省略時はTransportの容量を使い、
+- `StreamSpec(..., slots=None, rate_hz=100)` は従来のストリームです。slots省略時はTransportの容量を使い、
   明示した場合はSpecを優先します。FIFO／Latest／Syncの読了規約は変わりません。
 - `StateSpec(..., slots=2)` は現在値を保持します。既定は2面、1面または3面以上も指定できます。
   Transportの容量に関係なくStateSpecのslotsを使います。batch_sizeの指定はありません。
 - 同じ名前のデータに接続するAPは、種別・shape・dtype・layout・実効slot数を一致させます。
-  StreamSpecではbatch_sizeも一致が必要です。不一致はValueErrorです。
+  StreamSpecではbatch_sizeとrate_hzも一致が必要です。不一致はValueErrorです。
 - 保存方式は独立です。InProcess／SharedMemory／Fileすべてで同じ状態公開を使えます。
 
 ```python
@@ -59,7 +70,7 @@ from sigbus import Bus, InProcessTransport, StateSpec, StreamSpec, StatePolicy, 
 transport = InProcessTransport()
 bus = Bus(transport)
 sound_speed = StateSpec("sound_speed", (), "f8", slots=2)
-beam = StreamSpec("beam", (1024,), "c16", slots=5)
+beam = StreamSpec("beam", (1024,), "c16", slots=5, rate_hz=100)
 pub = bus.publisher(sound_speed)  # StatePolicyを自動選択
 sub = bus.subscriber(sound_speed)
 try:
@@ -89,7 +100,7 @@ closeはデータ削除ではありません。ただしInProcessTransport自体
 状態での`has_frame()`は現在値を取得可能かを返し、読了後も通常Trueです。
 **状態を `while sub.has_frame()` で読み切ろうとすると終了しません。**
 未公開、同じendpointで取得中、または単一slotで書き込み中／書き込み待ちならFalseです。
-状態の`acquire_batch()`はValueError、Publisherの`has_pending()`はFalse、
+状態の`acquire_batch()`は通常取得と同じFrameを返し、Publisherの`has_pending()`はFalse、
 `flush()`は端数がないためno-opです（書き込みリース中は従来どおり拒否）。
 
 ### 状態のバッファ数と更新失敗
@@ -235,7 +246,6 @@ Policyの共通契約は `open_stream(adapter, spec, mode)` と `acquire(factory
 
 既存コードの移行用に `Bus(transport, policy=...)` は残しています。
 endpointへの明示指定が優先され、省略時だけ旧Bus設定を使います。
-旧ReadCompletePolicyも互換用に残し、全読者の読了待ち・現在世代への途中参加という従来の意味を維持します。
 新しいグループ同期にはSyncPolicyを使ってください。
 旧ImmediatePolicy／PollingPolicyは提供しません。
 
@@ -249,7 +259,7 @@ endpointへの明示指定が優先され、省略時だけ旧Bus設定を使い
 
 SharedMemory/FileはプロセスごとにTransportを作成します。forkで継承したendpointは使用せず、
 spawnまたは独立起動で同じStreamSpec・slots・配信規約を指定します。
-TransportとAdapterは同義の実装で、各Transportには同名のAdapter別名があります。
+実装クラス名はInProcessTransport・SharedMemoryTransport・FileTransportに統一しています。
 
 closeはローカル資源の解放のみで保存データを削除しません。先に自分のendpointを閉じます。
 File/SharedMemoryの削除は全プロセスのendpointを閉じてから `transport.remove(spec)`、次にcloseです。
@@ -257,8 +267,8 @@ lockファイルとディレクトリは、別々のlockが並存する競合を
 Fileは固定容量で、全世代のアーカイブではありません。保持中の未読FIFOデータは正常再接続後にも取得できます。
 稼働中の.npyを直接読むとpinされないため、Subscriberから読み出してください。
 
-保存形式はversion 7です（Specの種別と状態更新の書き込み待ち情報を追加）。
-version 6以前は自動移行しません。既存データが必要なら旧実装で退避し、新しい保存先／namespaceを使用してください。payloadファイルも先頭にbatch軸を持つため、旧versionの自動移行は行いません。
+保存形式はversion 8です（StreamSpecのrate_hzを追加）。
+version 7以前は自動移行しません。既存データが必要なら旧実装で退避し、新しい保存先／namespaceを使用してください。payloadファイルも先頭にbatch軸を持つため、旧versionの自動移行は行いません。
 旧データを必要に応じて旧実装で読み出して退避し、新しい保存先／namespaceを使用してください。
 旧形式は明示的に拒否します。旧実装との同時利用も非対応です。
 
@@ -334,7 +344,7 @@ while subscriber.has_frame():
 ## slot内のバッチBuffer
 
 ```python
-spec = StreamSpec('audio', shape=(10, 10), dtype=np.float32, batch_size=4)
+spec = StreamSpec('audio', shape=(10, 10), dtype=np.float32, batch_size=4, rate_hz=100)
 publisher = bus.publisher(spec)
 subscriber = bus.subscriber(spec)
 try:
@@ -456,7 +466,7 @@ Subscriberの `acquire_batch()` は、1つの公開済みslotの未読部分を
 payloadのshapeは `(有効件数, *StreamSpec.shape)`、timestampsは各Frameに対応する整数のtupleです。
 
 ```python
-spec = StreamSpec('audio', shape=(512, 8), dtype=np.float32, batch_size=2)
+spec = StreamSpec('audio', shape=(512, 8), dtype=np.float32, batch_size=2, rate_hz=100)
 publisher = bus.publisher(spec)
 subscriber = bus.subscriber(spec)
 # Publisherは従来どおり512 sample × 8 channelを2回書き込む。
@@ -497,7 +507,7 @@ with内だけ有効で、後で使用する場合はcopyしてください。他
 - 分割APIは提供しません。1024 sampleを512 sampleずつ処理する場合は、
   with内でsamples[:512]とsamples[512:]のようなzero-copyスライスを使用してください。
 
-バッチ取得は保存形式version 6を使用し、通常のacquire()の戻り値や動作は変更しません。
+バッチ取得は保存形式version 8を使用し、通常のacquire()の戻り値や動作は変更しません。
 
 
 ### FileTransportのストリーム名と保存先
@@ -513,5 +523,180 @@ FileTransportでは `FileTransport(directory="/data")` とStream名 `audio` に�
 旧データは自動移動・削除しません。関連プロセスをすべて停止し、metadata.jsonの
 spec.nameを確認したうえで、そのハッシュディレクトリを対応する有効なStream名へ
 リネームするか、新しい保存先を使用してください。移動先が既に存在する場合は
-上書き・統合しないでください。ディレクトリ名の変更だけでは旧versionから移行できません。現在の形式はversion 6です。
+上書き・統合しないでください。ディレクトリ名の変更だけでは旧versionから移行できません。現在の形式はversion 8です。
 旧名が新しい制約を満たさない場合は、旧実装で必要データを退避して新しい名前で作成してください。
+
+## ビーム形成プロトタイプ
+
+状態公開とFIFOを組み合わせた実行例・使い勝手の検証結果は
+[examples/beamforming/README.md](examples/beamforming/README.md)を参照してください。
+計算はスタブ、通信とWorkerによるStage並行実行は実物です。
+
+## Nodeとendpointの手動操作
+
+NodeはAPの処理に必要なPublisher／Subscriberを登録する論理的なバス参加者です。
+単独endpointとNodeは同じ手動操作を提供し、ライフサイクル実装を共有します。
+
+| 操作 | 意味 |
+|---|---|
+| `reserve()` | 予約要求を登録する |
+| `checkout()` | 予約を成立させ、使用領域へのアクセスを取得する |
+| `commit()` | 出力を確定し、バックグラウンドsendへ渡す |
+| `complete()` | 入力を使い終え、読了・返却する |
+| `abort()` | 未確定出力を中止し、入力は未読のまま予約解除する |
+
+`commit()`は入力を返しません。`complete()`は出力を確定しません。
+`abort()`は既にcommitされた出力や、過去に確定したバッチ端数を取り消しません。
+Stateのcompleteは現在値の消費ではなく借用終了です。
+
+### 単独endpoint
+
+```python
+publisher.reserve(timestamp=10)
+out = publisher.checkout()
+# out.payloadに複数周期をかけて書き込める
+out.payload[...] = value
+publisher.commit()
+publisher.drain()  # 公開完了が必要な場合。確定済み端数もflushする。
+
+subscriber.reserve()
+inp = subscriber.checkout()
+process(inp.payload)
+subscriber.complete()
+```
+
+単独endpointのcheckoutはFrame、NodeのcheckoutはendpointをキーとするFrameのmappingを返します。
+checkoutは呼び出した時点で実行され、withは使いません。
+取得したビューはcommit／complete／abortまで有効です。派生ビューを含め、返却後には使わないでください。
+
+### Nodeで一式を扱う
+
+```python
+from sigbus import Node
+
+node = Node()
+node.add_subscriber(source)
+node.add_publisher(destination)
+
+node.reserve("subscribe")
+inputs = node.checkout()
+node.reserve("publish", timestamp=inputs[source].timestamp)
+outputs = node.checkout()
+
+# outputs[destination].payloadへ複数周期で計算する
+...
+node.commit()
+node.complete()
+node.close()
+```
+
+Nodeのreserveは`"subscribe"`、`"publish"`、`"all"`（既定）を指定できます。
+一式を取得する場合は`node.reserve(); frames = node.checkout()`と書けます。
+予約要求中に別のreserve、既に保持する対象の再予約、checkoutの並行実行は拒否します。
+checkoutはendpointごとに予約を進め、成立した予約を保持しながら残りを待ちます。
+一式が揃ってからビューを渡します。予約もslotの使用権を保護しますが、payloadをコピーしません。
+
+手動checkoutのtimeoutは取得待機に対する秒数です。期限切れはTimeoutErrorとなり、成立済み予約を保持します。
+同じcheckoutを再試行するか、abortで解除してください。APの計算時間の制限ではありません。
+既定は無期限待機です。`stop_event`または`node.stop()`で待機を中断できます。
+
+出力timestampはreserveで指定します。省略時は対象に含まれる、または保持中の最初のSubscriberから継承します。
+出力のみの取得にはtimestampが必要です。複数入力の時刻合わせは行いません。
+
+### with形式は手動APIのラッパー
+
+```python
+with node.acquire() as frames:
+    try:
+        process(frames[source].payload, frames[destination].payload)
+    except ProcessingError:
+        frames[destination].payload[...] = ERROR_VALUE
+```
+
+開始時にreserve→checkout、正常終了でcommit→completeを呼びます。
+取得中の失敗はabort、AP内の例外はcomplete→abortです。つまりAP内の例外では入力を読了にし、出力を中止します。
+手動abortだけなら入力は未読のままです。with内の手動操作や手動取得中のwith開始は拒否します。
+固定値・前回値はAPが設定し、通常のデータとして公開します。前回値はAP所有配列などで保持してください。
+
+既存の単独endpointの`with publisher.acquire(timestamp)`／`with subscriber.acquire()`も維持します。
+単独endpointのwithは同期公開・待機policyを使用します。
+新しい手動commitとNodeのcommitは非同期sendです。単独endpointでもwithと手動取得を同時に使うことはできません。
+
+### 資源所有
+
+endpoint生成時に対になる資源管理オブジェクトを自動生成します。APで管理オブジェクトを作る必要はありません。
+Node未使用ならendpointが所有します。Node登録時に同じ資源の所有権を移管します。
+**Node.close()は登録endpointも閉じます。以前の借用方式と異なり、close後にendpointを再利用できません。**
+二重登録、使用中の移管は拒否します。単独での手動作業・送信を完了したendpointはNodeへ移管できます。
+登録endpointの直接操作・closeは拒否しますが、ACKと状態照会は可能です。
+
+### drain・停止・終了
+
+`drain(grace_period=0, timeout=None, stop_event=None)`は確定済み端数を含め、出力を送り切る操作です。
+既定では直ちに端数をflushします。猶予期間を指定すると、別スレッドで通常のバッチ蓄積を進められます。
+猶予満了後は新規取得を止め、実行中の処理が返却されてから端数をflushします。未確定の計算結果は公開しません。
+猶予満了は正常動作であり、例外やwarningにはしません。
+
+- 完了ならTrue。全体のtimeoutまたは停止要求で待機を打ち切った場合はFalse。出力は保持し、sendは継続します。
+- Nodeの`flush()`は猶予なしのdrainです。Publisherと共通の「確定済み端数を直ちに公開する」操作として提供します。取得中のdrain/flushと、重複したdrainは拒否します。
+- `close()`は既定で端数まで送ってから資源を閉じます。期限内に終わらなければFalseで資源を保持します。
+- `discard()`は未送信出力を破棄して閉じる明示的な終端操作です。破棄終了にはこの操作を使います。
+- APが保持中の領域は勝手に解放しません。commit/completeまたはabortしてからclose/discardしてください。
+- with node自体の終了でcloseがキャンセルされた場合はInterruptedErrorです。Falseを成功扱いにして資源を失いません。
+
+sendは通常のOSErrorを同じslotでリトライします。空きslotがあればAPは次の処理を進められ、容量不足なら待機します。
+Stream削除・参加者除外・ACK失効・権限エラーなど継続不能な失敗は例外で通知します。
+バックグラウンド失敗はNodeSendErrorのcauseから参照できます。diagは未実装です。
+
+一式のcommit完了までその一式のsendは開始しませんが、下流から全出力が同時に見える保証はありません。
+commit途中で失敗し、一部だけ確定した場合はNodeを停止状態とし、不完全な一式を送信せず明示的な破棄を要求します。
+複数Node間の公平性、任意の循環接続の進行保証、プロセス異常終了後の自動再送・予約回収は提供しません。
+ストレージ形式はversion 8です。slot容量と再利用条件は接続構成に合わせて設計してください。
+
+## Streamの更新レートとNodeの取得単位
+
+`StreamSpec.rate_hz`は必須の正の有限値で、単位はFrame/秒です。
+payload内のサンプルレートやBatchの公開頻度ではありません。
+`StateSpec`には指定しません。旧Spec・旧保存形式との互換性はありません。
+
+Nodeは登録時にStream群の取得単位を検証します。
+
+- `acquire()` / `checkout()`：各Streamのrate_hzが一致する。
+- `acquire_batch()` / `checkout_batch()`：各Streamのbatch_size / rate_hzが一致する。
+
+登録時は少なくとも一方が成立すれば受け入れ、取得時に選んだモードを検証します。
+不正な登録ではendpointの資源管理を移管しません。
+例えば100 Frame/秒・batch_size=4と50 Frame/秒・batch_size=2はBatch取得で扱えます。
+Stateはレート比較から除外し、どちらのモードでもFrameを返します。
+比較は宣言した数値に基づきます。SigBusは実測レートの監視や周期実行を行いません。
+
+PublisherのBatch取得はslot全体への書き込みです。
+Frameごとのtimestampを明示し、commit後は送信処理に引き渡します。
+
+```python
+with publisher.acquire_batch(timestamps=[100, 110, 120, 130]) as batch:
+    batch.payload[...] = samples
+
+# Nodeの手動操作でも同じ取得単位を選ぶ
+node.reserve("publish", timestamps={publisher: [140, 150, 160, 170]})
+data = node.checkout_batch()
+data[publisher].payload[...] = next_samples
+node.commit()  # 公開を確定。中止する場合はcommit前にabort()
+```
+
+単独endpointもreserve → checkout_batch → commit / abortを使えます。
+Subscriberの正常な手動返却はcompleteです。
+Publisherに確定済みの端数が残る場合は、先にflushまたはdrainしてからBatchを書き込みます。
+Subscriberは1 slotの未読部分を返すため、端数や一部読了後のBatchは宣言サイズより小さくなります。
+有効件数はlen(batch.timestamps)で確認します。時刻同期・位相合わせ・欠落への対応はModule/Workerの責務です。
+
+### flushの実行方式
+
+`Publisher.flush()`と`Node.flush()`は、ともに確定済み端数を猶予なしで公開します。
+Nodeは登録した全Publisherを対象にします。入力だけのNodeでは送信待ちはありません。
+`drain(grace_period=...)`は通常のバッチ蓄積を待つ猶予期間を追加できる操作です。
+
+単独Publisherで同期のwith取得だけを使う場合、flushも同期実行し、I/O例外は呼び出し元へ返します。
+手動取得またはBatch書き込みを使ったPublisherとNodeではsenderへ渡して完了を待ち、
+完了ならTrue、timeout/停止による待機打切りならFalseを返します。一時的I/Oエラーはsenderが再試行します。
+いずれも未確定の書き込みは公開せず、資源を閉じません。

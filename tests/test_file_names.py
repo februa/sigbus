@@ -6,7 +6,7 @@ from sigbus import Bus, FileTransport, StreamSpec
 
 
 def test_readable_directory_and_reopen(tmp_path):
-    spec = StreamSpec('audio_1-test', (2,), 'f4')
+    spec = StreamSpec('audio_1-test', (2,), 'f4', rate_hz=100)
     transport = FileTransport(tmp_path)
     pub = Bus(transport).publisher(spec)
     with pub.acquire(123) as frame:
@@ -30,7 +30,7 @@ def test_readable_directory_and_reopen(tmp_path):
                                   '音声', 'a b', 'a.b', '_audio', 'a' * 64])
 def test_invalid_file_name_has_no_side_effects(tmp_path, name):
     transport = FileTransport(tmp_path)
-    spec = StreamSpec(name, (2,), 'f4')
+    spec = StreamSpec(name, (2,), 'f4', rate_hz=100)
     with pytest.raises(ValueError):
         Bus(transport).publisher(spec)
     with pytest.raises(ValueError):
@@ -40,7 +40,7 @@ def test_invalid_file_name_has_no_side_effects(tmp_path, name):
 
 
 def test_legacy_directory_requires_explicit_migration(tmp_path):
-    spec = StreamSpec('audio', (2,), 'f4')
+    spec = StreamSpec('audio', (2,), 'f4', rate_hz=100)
     legacy = tmp_path / sha256(spec.name.encode()).hexdigest()
     legacy.mkdir()
     transport = FileTransport(tmp_path)

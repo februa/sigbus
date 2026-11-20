@@ -1,3 +1,3 @@
-from .adapter import FileTransport, FileAdapter
+from .adapter import FileTransport
 
-__all__ = ["FileTransport", "FileAdapter"]
+__all__ = ["FileTransport"]

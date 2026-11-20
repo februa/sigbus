@@ -75,6 +75,3 @@ class InProcessTransport:
             self._retired.clear()
             self._storages.clear()
             self._closed = True
-
-
-InProcessAdapter = InProcessTransport

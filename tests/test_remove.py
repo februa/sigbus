@@ -13,7 +13,7 @@ from test_transports import make_transport, publish
 @pytest.fixture(params=['inprocess', 'file', 'shared_memory'])
 def domain(request, tmp_path):
     transport = make_transport(request.param, tmp_path)
-    yield transport, StreamSpec('remove', (8,), 'f8')
+    yield transport, StreamSpec('remove', (8,), 'f8', rate_hz=100)
     transport.remove('remove', force=True)
     transport.close()
 
@@ -90,7 +90,7 @@ def test_polling_stops_when_removed(domain):
 @pytest.mark.parametrize('kind', ['file', 'shared_memory'])
 def test_legacy_removal_without_spec_or_creation(kind, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     transport.remove('missing')
     assert not list(transport.directory.glob('*/metadata.json'))
     pub = Bus(transport).publisher(spec)
@@ -108,7 +108,7 @@ def test_legacy_removal_without_spec_or_creation(kind, tmp_path):
 @pytest.mark.parametrize('damage', ['json', 'structure'])
 def test_corruption_not_removal(kind, damage, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     sub = Bus(transport).subscriber(spec)
     path = next(transport.directory.glob('*/metadata.json'))
     original = path.read_text()
@@ -124,7 +124,7 @@ def test_corruption_not_removal(kind, damage, tmp_path):
 
 def test_permission_and_other_io_are_distinct(tmp_path, monkeypatch):
     transport = make_transport('file', tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     sub = Bus(transport).subscriber(spec)
     original = Path.read_text
     error = PermissionError('denied')
@@ -150,7 +150,7 @@ def test_permission_and_other_io_are_distinct(tmp_path, monkeypatch):
 
 def test_missing_payload_is_corruption(tmp_path):
     transport = make_transport('file', tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     pub = Bus(transport).publisher(spec)
     pub.close()
     slot = next(transport.directory.glob('*/slot-0.npy'))
@@ -163,7 +163,7 @@ def test_missing_payload_is_corruption(tmp_path):
 
 def removed_child(kind, root, conn):
     transport = make_transport(kind, root)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     sub = Bus(transport).subscriber(spec)
     conn.send('ready')
     conn.recv()
@@ -182,7 +182,7 @@ def removed_child(kind, root, conn):
 @pytest.mark.parametrize('recreate', [False, True])
 def test_removed_in_other_process(kind, recreate, tmp_path):
     transport = make_transport(kind, tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     ctx = mp.get_context('spawn')
     parent, child = ctx.Pipe()
     process = ctx.Process(target=removed_child, args=(kind, str(tmp_path), child))
@@ -213,7 +213,7 @@ def test_removed_in_other_process(kind, recreate, tmp_path):
 
 def test_permission_on_open_is_classified(tmp_path, monkeypatch):
     transport = make_transport('file', tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     original = Path.mkdir
     cause = PermissionError('denied')
     def denied(path, *args, **kwargs):
@@ -230,13 +230,13 @@ def test_permission_on_open_is_classified(tmp_path, monkeypatch):
 
 def test_open_corrupt_buffer_and_spec_mismatch_are_distinct(tmp_path):
     transport = make_transport('file', tmp_path)
-    spec = StreamSpec('remove', (8,), 'f8')
+    spec = StreamSpec('remove', (8,), 'f8', rate_hz=100)
     pub = Bus(transport).publisher(spec)
     pub.close()
     transport.close()
     other = make_transport('file', tmp_path)
     with pytest.raises(ValueError):
-        Bus(other).subscriber(StreamSpec('remove', (7,), 'f8'))
+        Bus(other).subscriber(StreamSpec('remove', (7,), 'f8', rate_hz=100))
     slot = next(other.directory.glob('*/slot-0.npy'))
     slot.write_bytes(b'not a numpy buffer')
     with pytest.raises(StreamCorruptedError) as caught:

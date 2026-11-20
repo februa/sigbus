@@ -1,5 +1,6 @@
 """Nonblocking execution conditions. Times use the Worker's monotonic clock."""
 from dataclasses import dataclass
+from threading import Event as Notification
 import math
 from typing import Callable, Protocol
 
@@ -56,7 +57,7 @@ class _PeriodicCondition:
 
 
 @dataclass(frozen=True)
-class Event:
+class Polling:
     """Poll a non-consuming predicate created by condition(stage).
 
     Check again after interval, including after a run, to bound empty spinning.
@@ -74,11 +75,11 @@ class Event:
         predicate = self.condition(stage)
         if not callable(predicate):
             raise TypeError("condition factory must return a callable predicate")
-        return _EventCondition(predicate, self.interval, start)
+        return _PredicateCondition(predicate, self.interval, start)
 
 
 @dataclass
-class _EventCondition:
+class _PredicateCondition:
     predicate: Callable
     interval: float
     deadline: float
@@ -94,4 +95,32 @@ class _EventCondition:
 
     def after_run(self, finished_at):
         self.deadline = finished_at + self.interval
+        return 0
+
+
+@dataclass(frozen=True)
+class Event:
+    """Wait indefinitely for Worker.wake(stage); no predicate or polling.
+
+    Notifications coalesce. A notification during execution requests another pass.
+    Notifications before initialization completes are retained by Worker.
+    """
+    def bind(self, stage, start, *, notification=None):
+        return _NotificationCondition(notification if notification is not None else Notification())
+
+
+@dataclass
+class _NotificationCondition:
+    notification: Notification
+
+    def ready(self, now):
+        if not self.notification.is_set():
+            return False
+        self.notification.clear()
+        return True
+
+    def next_check(self):
+        return math.inf
+
+    def after_run(self, finished_at):
         return 0

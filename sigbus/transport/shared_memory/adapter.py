@@ -13,7 +13,3 @@ class SharedMemoryTransport(PersistentTransport):
             raise ValueError("namespace must be a nonempty string")
         root = Path(directory) if directory is not None else Path(tempfile.gettempdir()) / "sigbus-shm"
         super().__init__(root / sha256(namespace.encode()).hexdigest(), slots)
-
-
-
-SharedMemoryAdapter = SharedMemoryTransport

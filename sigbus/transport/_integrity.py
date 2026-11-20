@@ -38,7 +38,7 @@ def check_metadata(state, name, operation, *, legacy=False):
             raise ValueError('stream name does not match metadata')
         if not isinstance(state['slots'], list) or not state['slots']:
             raise ValueError('invalid slots')
-        if legacy or state['version'] != 7:
+        if legacy or state['version'] != 8:
             return
         spec = state['spec']
         if spec['kind'] not in ('stream', 'state'):
@@ -48,9 +48,15 @@ def check_metadata(state, name, operation, *, legacy=False):
         dtype = np.lib.format.descr_to_dtype(spec['dtype'])
         if dtype.hasobject or dtype.itemsize <= 0 or spec['layout'] != 'row_major':
             raise ValueError('invalid dtype or layout')
+        rate = spec['rate_hz']
+        if spec['kind'] == 'stream':
+            if isinstance(rate, bool) or not isinstance(rate, (int, float)) or not math.isfinite(rate) or rate <= 0:
+                raise ValueError('invalid Frame rate')
+        elif rate is not None:
+            raise ValueError('State must not have a rate')
         delivery = state['delivery']
         if delivery is not None:
-            if delivery['reuse'] not in ('fifo', 'available', 'all_readers', 'sync', 'state'):
+            if delivery['reuse'] not in ('fifo', 'available', 'sync', 'state'):
                 raise ValueError('invalid delivery')
             if delivery['no_readers'] not in ('hold', 'wait', 'proceed'):
                 raise ValueError('invalid reader rule')
@@ -73,7 +79,7 @@ def check_metadata(state, name, operation, *, legacy=False):
                 raise ValueError('invalid writer intent')
             if (spec['kind'] == 'state') != (endpoint['reuse'] == 'state'):
                 raise ValueError('endpoint kind mismatch')
-            if endpoint['reuse'] not in ('fifo', 'available', 'all_readers', 'sync', 'state'):
+            if endpoint['reuse'] not in ('fifo', 'available', 'sync', 'state'):
                 raise ValueError('invalid endpoint policy')
             if endpoint['reuse'] == 'sync' and (not isinstance(endpoint['group'], str) or not endpoint['group']):
                 raise ValueError('invalid participant group')

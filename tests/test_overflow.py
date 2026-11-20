@@ -6,7 +6,7 @@ from test_transports import make_transport, publish
 @pytest.fixture(params=['inprocess', 'file', 'shared_memory'])
 def queue(request, tmp_path):
     transport = make_transport(request.param, tmp_path, 5)
-    spec = StreamSpec('overflow', (8,), 'f8')
+    spec = StreamSpec('overflow', (8,), 'f8', rate_hz=100)
     yield transport, spec
     if request.param != 'inprocess':
         transport.remove(spec)

@@ -1,3 +1,3 @@
-from .adapter import InProcessTransport, InProcessAdapter
+from .adapter import InProcessTransport
 
-__all__ = ["InProcessTransport", "InProcessAdapter"]
+__all__ = ["InProcessTransport"]

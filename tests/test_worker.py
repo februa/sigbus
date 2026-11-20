@@ -1,8 +1,7 @@
 import threading
 
 import pytest
-from worker import Event, ModuleSpec, Periodic, RunResult, Stage, State, Worker, WorkerError
-from worker.adapters.sigbus import StreamReady
+from sigbus.worker import Polling, ModuleSpec, Periodic, RunResult, Stage, State, Worker, WorkerError
 
 
 class Module:
@@ -67,7 +66,7 @@ def test_stage_threads_overlap():
             barrier.wait()
             return super().run_once()
     a, b = Concurrent(), Concurrent()
-    Worker([stage("a", a), stage("b", b, Event(always))]).run()
+    Worker([stage("a", a), stage("b", b, Polling(always))]).run()
     assert a.threads[0] != b.threads[0]
 
 
@@ -87,7 +86,7 @@ def test_pipeline_processes_next_item_while_downstream_is_busy():
             assert second_published.wait(2)
             return RunResult.FINISHED
     Worker([stage("source", Source()),
-            stage("sink", Sink(), Event(lambda s: published.is_set))]).run()
+            stage("sink", Sink(), Polling(lambda s: published.is_set))]).run()
 
 
 def test_idle_aborts_pass_without_rollback():
@@ -126,7 +125,7 @@ def test_periodic_absolute_schedule_skips_without_drift():
 
 def test_event_throttles_idle_and_condition_checks():
     calls = []
-    condition = Event(lambda s: lambda: calls.append(1) or True, interval=0.1).bind(None, 0)
+    condition = Polling(lambda s: lambda: calls.append(1) or True, interval=0.1).bind(None, 0)
     assert condition.ready(0)
     condition.after_run(0.01)
     assert not condition.ready(0.05)
@@ -157,7 +156,7 @@ def test_error_stops_other_waiting_stage():
         def run_once(self):
             raise ValueError("run failed")
     worker = Worker([stage("bad", Broken()),
-        stage("peer", Module(), Event(lambda s: lambda: False, interval=60))])
+        stage("peer", Module(), Polling(lambda s: lambda: False, interval=60))])
     with pytest.raises(WorkerError):
         worker.run()
     assert worker.state is State.FAILED
@@ -190,7 +189,7 @@ def test_stop_interrupts_long_wait():
     def predicate():
         checked.set()
         return False
-    worker = Worker([stage("waiting", Module(), Event(lambda s: predicate, interval=60))])
+    worker = Worker([stage("waiting", Module(), Polling(lambda s: predicate, interval=60))])
     thread = threading.Thread(target=worker.run)
     thread.start()
     try:
@@ -233,7 +232,7 @@ def test_two_subscribers_receive_same_stream():
     from sigbus import Bus, StreamSpec, InProcessTransport
     transport = InProcessTransport()
     bus = Bus(transport)
-    spec = StreamSpec("worker-test", (), "i8", slots=4)
+    spec = StreamSpec("worker-test", (), "i8", slots=4, rate_hz=100)
     pub = bus.publisher(spec)
     values = []
     class Reader:
@@ -248,7 +247,7 @@ def test_two_subscribers_receive_same_stream():
     try:
         with pub.acquire(timestamp=0) as frame:
             frame.payload[...] = 42
-        Worker([stage(name, Reader(), Event(lambda s: StreamReady(s.module("module").sub)))
+        Worker([stage(name, Reader(), Polling(lambda s: s.module("module").sub.has_frame))
                 for name in ("a", "b")]).run()
         assert values == [42, 42]
     finally:
@@ -261,7 +260,7 @@ def test_invalid_schedule(value):
     with pytest.raises(ValueError):
         Periodic(value)
     with pytest.raises(ValueError):
-        Event(always, interval=value)
+        Polling(always, interval=value)
 
 
 def test_no_shared_module_registration():
@@ -299,7 +298,7 @@ def test_condition_failure_cleans_up_initialized_modules():
     def broken(stage):
         raise ValueError("condition failed")
     module = Module()
-    worker = Worker([stage("broken", module, Event(broken))])
+    worker = Worker([stage("broken", module, Polling(broken))])
     with pytest.raises(WorkerError):
         worker.run()
     assert module.log == [("module", "initialize"), ("module", "finalize")]

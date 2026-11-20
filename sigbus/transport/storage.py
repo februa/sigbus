@@ -16,10 +16,11 @@ from ..errors import (NoFrameAvailable, NoWritableSlot, StreamRemovedError,
 
 def initial_state(spec, slots):
     return {
-        "version": 7, "delivery": None,
+        "version": 8, "delivery": None,
         "spec": {"kind": spec.kind, "name": spec.name, "shape": list(spec.shape),
                  "dtype": np.lib.format.dtype_to_descr(spec.dtype),
-                 "layout": spec.layout, "batch_size": spec.batch_size},
+                 "layout": spec.layout, "batch_size": spec.batch_size,
+                 "rate_hz": getattr(spec, "rate_hz", None)},
         "generation": 0, "latest": None, "endpoints": {},
         "slots": [{"generation": 0, "timestamp": 0, "writer": None, "readers": [], "pending": [], "occupied": False, "count": 0, "timestamps": [], "progress": {}, "barrier": [], "group": None}
                   for _ in range(slots)],
@@ -27,12 +28,13 @@ def initial_state(spec, slots):
 
 
 def validate_state(state, spec, slots):
-    if state["version"] != 7:
+    if state["version"] != 8:
         raise ValueError("unsupported storage version; use a new directory/namespace for this storage format")
     saved = state["spec"]
-    if (state["version"] != 7 or saved["name"] != spec.name
+    if (state["version"] != 8 or saved["name"] != spec.name
             or tuple(saved["shape"]) != spec.shape
             or np.lib.format.descr_to_dtype(saved["dtype"]) != spec.dtype
+            or saved["rate_hz"] != getattr(spec, "rate_hz", None)
             or saved["kind"] != spec.kind
             or saved["layout"] != spec.layout or saved["batch_size"] != spec.batch_size
             or len(state["slots"]) != slots):
@@ -94,6 +96,83 @@ class Lease:
             del self.frame
         return False
 
+
+class PendingSend:
+    """A sealed slot owned by the sender until publication or explicit discard."""
+
+    def __init__(self, storage, endpoint_id, slot):
+        self.storage = storage
+        self.endpoint_id = endpoint_id
+        self.slot = slot
+        self.queued = True
+
+    def send(self):
+        if not self.queued:
+            raise RuntimeError("slot is not queued for sending")
+        self.storage.send_reserved(self.endpoint_id, self.slot)
+        self.queued = False
+
+    def discard(self):
+        if self.queued:
+            self.storage.discard_reserved(self.endpoint_id, self.slot)
+            self.queued = False
+
+
+class Reservation(PendingSend):
+    """Pin a slot first; expose its payload only after the group is ready."""
+
+    def __init__(self, storage, endpoint_id, timestamp=None, *, batch=False):
+        self.batch = batch and storage.spec.kind == "stream"
+        self.storage = storage
+        self.endpoint_id = endpoint_id
+        self.slot, self.position, self.timestamp, self.mode, self.generation = storage.reserve(
+            endpoint_id, timestamp, batch=self.batch)
+        self.frame = None
+        self.finished = False
+        self.queued = False
+
+    def check(self):
+        with self.storage.transaction(read_only=True) as state:
+            endpoint = self.storage._endpoint(state, self.endpoint_id)
+            if self.finished or not endpoint["active"]:
+                raise RuntimeError("reservation is no longer active")
+
+    def checkout(self):
+        self.check()
+        if self.frame is not None:
+            raise RuntimeError("reservation payload already acquired")
+        if self.batch:
+            start = self.position + 1 - len(self.timestamp) if self.mode == "read" else 0
+            payload = self.storage.arrays[self.slot][start:start + len(self.timestamp)].view()
+        else:
+            payload = self.storage.frame_payload(self.slot, self.position)
+        if self.mode == "read":
+            payload.flags.writeable = False
+        self.frame = Batch(self.timestamp, payload) if self.batch else Frame(self.timestamp, payload, self.generation)
+        return self.frame
+
+    def _invalidate(self):
+        if self.frame is not None:
+            self.frame.payload.flags.writeable = False
+            self.frame = None
+
+    def commit(self):
+        if self.mode != "write" or self.finished:
+            raise RuntimeError("commit requires an active write reservation")
+        self.queued = self.storage.commit_reserved(self.endpoint_id, self.slot)
+        self.finished = True
+        self._invalidate()
+        return self.queued
+
+    def release(self, *, consume=False):
+        if self.finished:
+            return
+        try:
+            self.storage.release(self.endpoint_id, self.slot, self.position,
+                                 self.mode, False, consume=consume)
+        finally:
+            self._invalidate()
+        self.finished = True
 
 class StreamStorage:
     def __init__(self):
@@ -165,8 +244,6 @@ class StreamStorage:
                 if reader_reuse == "sync" and (writer["reuse"] != "sync"
                                                or reader_group != writer["group"]):
                     raise ValueError("Sync subscriber requires a Sync publisher with the same group")
-                if reader_reuse == "all_readers" and writer["reuse"] != "all_readers":
-                    raise ValueError("legacy ReadComplete subscriber requires a ReadComplete publisher")
             if mode == "read" and old is not None:
                 validate_reader(reuse, group, old)
             if mode == "write":
@@ -183,11 +260,6 @@ class StreamStorage:
                 for entry in state["slots"]:
                     if entry["occupied"] and entry["writer"] is None:
                         entry["pending"].append(endpoint_id)
-            if mode == "read" and reuse == "all_readers" and latest is not None:
-                # Legacy ReadComplete joins the current generation.
-                if not any(slot["writer"] for slot in state["slots"]):
-                    state["slots"][latest]["pending"].append(endpoint_id)
-                    state["slots"][latest]["barrier"].append(endpoint_id)
             state["endpoints"][endpoint_id] = {
                 "mode": mode, "reuse": reuse, "group": group, "cursor": 0,
                 "active": False, "waiting_write": False, "buffer": None, "ack": asdict(ack) if ack else None,
@@ -226,9 +298,7 @@ class StreamStorage:
         return Lease(self, endpoint_id, index(timestamp))
 
     def acquire_read(self, endpoint_id, *, batch=False):
-        if batch and self.spec.kind == "state":
-            raise ValueError("StateSpec does not support acquire_batch")
-        return Lease(self, endpoint_id, batch=batch)
+        return Lease(self, endpoint_id, batch=batch and self.spec.kind == "stream")
 
     @staticmethod
     def _read_slot(state, endpoint_id, endpoint):
@@ -261,6 +331,15 @@ class StreamStorage:
             if endpoint["active"]:
                 raise RuntimeError("endpoint already holds a frame")
             mode = endpoint["mode"]
+            if mode == "write":
+                if batch:
+                    timestamp = tuple(index(t) for t in timestamp)
+                    if len(timestamp) != self.spec.batch_size:
+                        raise ValueError("batch timestamps must match batch_size")
+                    if endpoint["buffer"] is not None:
+                        raise ValueError("flush the pending partial batch before batch checkout")
+                else:
+                    timestamp = index(timestamp)
             delivery = state["delivery"]
             if mode == "write" and any(e["status"] == "timed_out" for e in state["endpoints"].values()):
                 raise AckTimeoutError("stream participant ACK timed out; close the participant")
@@ -270,12 +349,11 @@ class StreamStorage:
                 readers = [e for e in state["endpoints"].values()
                            if e["mode"] == "read" and e["status"] == "joined"]
                 sync = delivery["reuse"] == "sync"
-                legacy = delivery["reuse"] == "all_readers"
                 targets = ([e for e in readers if e["reuse"] == "sync"
                             and e["group"] == delivery["group"]] if sync else readers)
                 if delivery["no_readers"] == "wait" and not targets:
                     raise BlockingIOError("waiting for a subscriber")
-                if (sync or legacy) and (
+                if sync and (
                         any(entry["writer"] is not None and
                             state["endpoints"][entry["writer"]]["status"] != "excluded"
                             for entry in state["slots"])
@@ -300,7 +378,7 @@ class StreamStorage:
                               for e in state["slots"]) else "capacity exhausted by unread or protected frames")
                     raise NoWritableSlot(f"Stream {state['spec']['name']!r}: {reason}; release/consume frames")
                 _, slot = min(candidates)
-                if legacy or slot == state["latest"]:
+                if slot == state["latest"]:
                     state["latest"] = None
                 state["slots"][slot]["pending"] = []
                 state["slots"][slot]["barrier"] = []
@@ -339,7 +417,8 @@ class StreamStorage:
         entry["generation"] = state["generation"]
         entry["timestamp"] = entry["timestamps"][-1]
         entry["writer"] = None
-        endpoint["buffer"] = None
+        if endpoint["buffer"] == slot:
+            endpoint["buffer"] = None
         state["latest"] = slot
         delivery = state["delivery"]
         readers = {key: value for key, value in state["endpoints"].items()
@@ -349,13 +428,12 @@ class StreamStorage:
                             (value["reuse"] != "sync" or
                              (delivery["reuse"] == "sync" and value["group"] == delivery["group"]))]
         entry["barrier"] = [key for key, value in readers.items()
-                            if delivery["reuse"] == "all_readers" or
-                            (delivery["reuse"] == "sync" and value["reuse"] == "sync"
-                             and value["group"] == delivery["group"])]
+                            if delivery["reuse"] == "sync" and value["reuse"] == "sync"
+                            and value["group"] == delivery["group"]]
         entry["group"] = delivery["group"]
         entry["occupied"] = bool(entry["pending"]) or delivery["no_readers"] == "hold"
 
-    def release(self, endpoint_id, slot, position, mode, success):
+    def release(self, endpoint_id, slot, position, mode, success, *, consume=True):
         with self.transaction() as state:
             entry = state["slots"][slot]
             endpoint = state["endpoints"][endpoint_id]
@@ -376,9 +454,9 @@ class StreamStorage:
                     endpoint["buffer"] = None
             else:
                 entry["readers"].remove(endpoint_id)
-                if endpoint["reuse"] != "state":
+                if consume and endpoint["reuse"] != "state":
                     entry["progress"][endpoint_id] = position + 1
-                if endpoint["reuse"] != "state" and position + 1 == entry["count"]:
+                if consume and endpoint["reuse"] != "state" and position + 1 == entry["count"]:
                     if endpoint_id in entry["pending"]:
                         entry["pending"].remove(endpoint_id)
                     if endpoint_id in entry["barrier"]:
@@ -389,6 +467,65 @@ class StreamStorage:
             endpoint["active"] = False
         if mode == "write" and endpoint["status"] != "joined" and success:
             self._endpoint(state, endpoint_id)
+
+    def commit_reserved(self, endpoint_id, slot):
+        """Seal a frame without publishing or flushing its payload."""
+        with self.transaction() as state:
+            endpoint = self._publisher(state, endpoint_id)
+            entry = state["slots"][slot]
+            if not endpoint["active"] or entry["writer"] != endpoint_id:
+                raise RuntimeError("write reservation is no longer active")
+            timestamps = endpoint["timestamp"]
+            if not isinstance(timestamps, (tuple, list)):
+                timestamps = [timestamps]
+            entry["timestamps"].extend(timestamps)
+            entry["count"] += len(timestamps)
+            endpoint["active"] = False
+            ready = entry["count"] == state["spec"]["batch_size"]
+            if ready:
+                # Keep writer ownership until send completes, but allow the next
+                # reservation to use another slot. No payload copies or new format.
+                endpoint["buffer"] = None
+        return ready
+
+    def queue_pending(self, endpoint_id):
+        with self.transaction() as state:
+            endpoint = self._publisher(state, endpoint_id)
+            if endpoint["active"]:
+                raise RuntimeError("release the active reservation before flushing")
+            slot = endpoint["buffer"]
+            if slot is not None:
+                endpoint["buffer"] = None
+            return slot
+
+    def send_reserved(self, endpoint_id, slot):
+        with self.transaction() as state:
+            endpoint = self._publisher(state, endpoint_id)
+            if any(e["status"] == "timed_out" for e in state["endpoints"].values()):
+                raise AckTimeoutError("stream participant ACK timed out")
+            entry = state["slots"][slot]
+            if entry["writer"] != endpoint_id or endpoint["buffer"] == slot:
+                raise RuntimeError("slot is not queued for sending")
+            self.flush_slot(slot)
+            self._publish(state, endpoint, slot)
+
+    def discard_reserved(self, endpoint_id, slot):
+        with self.transaction() as state:
+            entry = state["slots"][slot]
+            if entry["writer"] == endpoint_id:
+                entry.update(writer=None, count=0, timestamps=[])
+
+    def discard_pending(self, endpoint_id):
+        with self.transaction() as state:
+            endpoint = state["endpoints"].get(endpoint_id)
+            if endpoint is None:
+                return
+            if endpoint["active"]:
+                raise RuntimeError("release the active reservation before discarding")
+            slot = endpoint["buffer"]
+            if slot is not None:
+                state["slots"][slot].update(writer=None, count=0, timestamps=[])
+                endpoint["buffer"] = None
 
     @staticmethod
     def _publisher(state, endpoint_id):
@@ -432,6 +569,9 @@ class StreamStorage:
             if endpoint is not None:
                 if endpoint["active"]:
                     raise RuntimeError("release the active frame before closing the endpoint")
+                if any(entry["writer"] == endpoint_id and i != endpoint["buffer"]
+                       for i, entry in enumerate(state["slots"])):
+                    raise RuntimeError("drain or discard queued sends before closing the endpoint")
                 if endpoint["buffer"] is not None:
                     entry = state["slots"][endpoint["buffer"]]
                     entry["writer"] = None

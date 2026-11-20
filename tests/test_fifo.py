@@ -4,7 +4,7 @@ from threading import Event
 
 import pytest
 
-from sigbus import (Bus, FIFOPolicy, LatestPolicy, ReadCompletePolicy,
+from sigbus import (Bus, FIFOPolicy, LatestPolicy, SyncPolicy,
                     PollingWait, StreamSpec)
 from test_transports import make_transport, publish
 
@@ -12,7 +12,7 @@ from test_transports import make_transport, publish
 @pytest.fixture(params=['inprocess', 'file', 'shared_memory'])
 def queue(request, tmp_path):
     transport = make_transport(request.param, tmp_path, 10)
-    spec = StreamSpec('fifo', (8,), 'f8')
+    spec = StreamSpec('fifo', (8,), 'f8', rate_hz=100)
     yield transport, spec
     if request.param != 'inprocess':
         transport.remove(spec)
@@ -97,7 +97,7 @@ def test_concurrent_reservations_commit_order_and_abort(queue):
 @pytest.mark.parametrize('kind', ['inprocess', 'file', 'shared_memory'])
 def test_single_slot_polling(kind, tmp_path):
     transport = make_transport(kind, tmp_path, 1)
-    spec = StreamSpec('single', (8,), 'f8')
+    spec = StreamSpec('single', (8,), 'f8', rate_hz=100)
     bus = Bus(transport, policy=FIFOPolicy(wait=PollingWait(timeout=2), overflow="block"))
     pub, sub = bus.publisher(spec), bus.subscriber(spec)
     publish(pub, 0, 0)
@@ -127,7 +127,7 @@ def test_single_slot_polling(kind, tmp_path):
 @pytest.mark.parametrize('no_readers', ['proceed', 'wait'])
 def test_no_reader_rules(no_readers, tmp_path):
     transport = make_transport('inprocess', tmp_path, 1)
-    spec = StreamSpec('rules', (8,), 'f8')
+    spec = StreamSpec('rules', (8,), 'f8', rate_hz=100)
     bus = Bus(transport, policy=FIFOPolicy(no_readers=no_readers))
     pub = bus.publisher(spec)
     if no_readers == 'wait':
@@ -153,7 +153,7 @@ def test_no_reader_rules(no_readers, tmp_path):
 
 def fifo_child(kind, root, conn):
     transport = make_transport(kind, root, 10)
-    spec = StreamSpec('fifo', (8,), 'f8')
+    spec = StreamSpec('fifo', (8,), 'f8', rate_hz=100)
     sub = Bus(transport).subscriber(spec)
     values = []
     for _ in range(10):
@@ -168,7 +168,7 @@ def fifo_child(kind, root, conn):
 @pytest.mark.parametrize('kind', ['file', 'shared_memory'])
 def test_reopen_and_spawn_fifo(kind, tmp_path):
     transport = make_transport(kind, tmp_path, 10)
-    spec = StreamSpec('fifo', (8,), 'f8')
+    spec = StreamSpec('fifo', (8,), 'f8', rate_hz=100)
     pub = Bus(transport).publisher(spec)
     for i in range(10):
         publish(pub, i, i)
@@ -194,13 +194,13 @@ def test_reopen_and_spawn_fifo(kind, tmp_path):
     transport.close()
 
 
-@pytest.mark.parametrize('policy', [LatestPolicy(), ReadCompletePolicy()])
+@pytest.mark.parametrize('policy', [LatestPolicy(), SyncPolicy()])
 def test_named_policies(queue, policy):
     transport, spec = queue
     bus = Bus(transport, policy=policy)
     pub, sub = bus.publisher(spec), bus.subscriber(spec)
     publish(pub, 1, 1)
-    if isinstance(policy, ReadCompletePolicy):
+    if isinstance(policy, SyncPolicy):
         with pytest.raises(BlockingIOError):
             publish(pub, 2, 2)
         expected = 1
@@ -228,7 +228,7 @@ def test_custom_constructor_and_bus_contract(tmp_path):
     transport = make_transport('inprocess', tmp_path, 1)
     policy = CustomPolicy({'user': 'configuration'})
     bus = Bus(transport, policy=policy)
-    spec = StreamSpec('custom', (8,), 'f8')
+    spec = StreamSpec('custom', (8,), 'f8', rate_hz=100)
     pub, sub = bus.publisher(spec), bus.subscriber(spec)
     publish(pub, 1, 1)
     with sub.acquire() as frame:

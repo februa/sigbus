@@ -14,8 +14,8 @@ class Policy(Protocol):
 
 
 def _validate_delivery(reuse, no_readers):
-    if reuse not in ("available", "all_readers", "fifo", "sync", "state"):
-        raise ValueError("reuse must be available, all_readers, fifo, sync or state")
+    if reuse not in ("available", "fifo", "sync", "state"):
+        raise ValueError("reuse must be available, fifo, sync or state")
     if no_readers not in ("proceed", "wait", "hold"):
         raise ValueError("no_readers must be proceed, wait or hold")
 
@@ -112,20 +112,6 @@ class FIFOPolicy(_DeliveryPolicy):
     def __post_init__(self):
         if self.overflow not in ("drop_oldest", "block"):
             raise ValueError("overflow must be drop_oldest or block")
-        _validate_delivery(self.reuse, self.no_readers)
-        if self.wait is None:
-            object.__setattr__(self, "wait", ImmediateWait())
-
-
-@dataclass(frozen=True, slots=True)
-class ReadCompletePolicy(_DeliveryPolicy):
-    """Allow the next write only after all current readers have returned."""
-    wait: object = None
-    no_readers: str = "proceed"
-    ack: AckSettings | None = None
-    reuse = "all_readers"
-
-    def __post_init__(self):
         _validate_delivery(self.reuse, self.no_readers)
         if self.wait is None:
             object.__setattr__(self, "wait", ImmediateWait())

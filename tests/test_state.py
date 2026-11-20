@@ -58,8 +58,9 @@ def test_repeat_current_and_generation(state_domain):
         late = Bus(state_domain).subscriber(spec)
         stack.callback(late.close)
         assert read(late, 4) == 2
-        with pytest.raises(ValueError, match='acquire_batch'):
-            sub.acquire_batch()
+        with sub.acquire_batch() as frame:
+            assert frame.payload.shape == spec.shape
+            assert frame.generation == 2
 
 
 @pytest.mark.parametrize('slots', [1, 2, 3])
@@ -148,15 +149,15 @@ def test_spec_capacity_and_kind_validation(state_domain):
         assert len(pub._endpoint._storage.arrays) == 1
         bus = Bus(state_domain)
         for wrong in (StateSpec('state', (8,), 'f8', slots=2),
-                      StreamSpec('state', (8,), 'f8', slots=1)):
+                      StreamSpec('state', (8,), 'f8', slots=1, rate_hz=100)):
             with pytest.raises(ValueError):
                 bus.subscriber(wrong)
         for policy in (FIFOPolicy(), LatestPolicy(), SyncPolicy()):
             with pytest.raises(ValueError, match='StateSpec'):
                 bus.subscriber(StateSpec('other', (8,), 'f8'), policy=policy)
         with pytest.raises(ValueError):
-            bus.publisher(StreamSpec('other', (8,), 'f8'), policy=StatePolicy())
-        signal = StreamSpec('signal', (8,), 'f8', slots=5)
+            bus.publisher(StreamSpec('other', (8,), 'f8', rate_hz=100), policy=StatePolicy())
+        signal = StreamSpec('signal', (8,), 'f8', slots=5, rate_hz=100)
         stream_pub, stream_sub = endpoints(state_domain, signal, stack)
         assert len(stream_pub._endpoint._storage.arrays) == 5
         for i in range(5):

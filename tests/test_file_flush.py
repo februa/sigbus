@@ -7,7 +7,7 @@ from sigbus import Bus, FileTransport, StreamSpec
 
 def test_flush_only_published_slot_before_metadata(tmp_path, monkeypatch):
     transport = FileTransport(tmp_path, slots=10)
-    spec = StreamSpec('flush', (2,), 'f4', batch_size=100)
+    spec = StreamSpec('flush', (2,), 'f4', batch_size=100, rate_hz=100)
     pub, sub = Bus(transport).publisher(spec), Bus(transport).subscriber(spec)
     storage = pub._endpoint._storage
     calls = []
@@ -47,7 +47,7 @@ def test_flush_only_published_slot_before_metadata(tmp_path, monkeypatch):
 @pytest.mark.parametrize('batch_size,explicit', [(1, False), (3, False), (3, True)])
 def test_flush_failure_preserves_prefix_and_releases_lease(tmp_path, monkeypatch, batch_size, explicit):
     transport = FileTransport(tmp_path)
-    spec = StreamSpec('failure', (2,), 'f4', batch_size=batch_size)
+    spec = StreamSpec('failure', (2,), 'f4', batch_size=batch_size, rate_hz=100)
     pub, sub = Bus(transport).publisher(spec), Bus(transport).subscriber(spec)
     storage = pub._endpoint._storage
     for i in range(batch_size - 1):

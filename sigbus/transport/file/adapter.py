@@ -18,6 +18,3 @@ class FileTransport(PersistentTransport):
                              "stop all users and rename it to the stream name, "
                              "or use a new storage directory")
         return directory
-
-
-FileAdapter = FileTransport

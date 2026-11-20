@@ -1,26 +1,28 @@
-# worker
+# WorkerとModule
 
-同一プロセス内で信号処理Moduleを動かす、SigBusから独立したモジュールです。
+SigBus内で処理単位と実行制御の責務を分けます。
 
-- Module：処理単位。初期化・1回分の処理・終了を実装します。
-- Stage：逐次実行とスケジュールの単位。1つ以上のModuleを登録順に実行します。
-- Worker：同一プロセスへの配置単位。Stageごとに専用スレッドを起動します。
+- `sigbus.module.Module`：SigBusの接続・Node・endpointの所有と処理ライフサイクル。
+- `sigbus.worker.Stage`：Moduleを登録順に実行するスケジュール単位。
+- `sigbus.worker.Worker`：Stageごとにスレッドを起動する実行制御。
 
-Stage間は並行実行、Stage内は逐次実行です。SigBus本体は変更しません。
-プロセス生成・Control Plane・パラメータ配送は今回の対象外です。
+Stage間は並行実行、Stage内は逐次実行です。
+WorkerはModuleの通信・資源管理を実装せず、ライフサイクルと停止通知の契約だけを使います。
+ModuleはWorkerを保持・importせず、単体で初期化・処理・終了できます。
+プロセス生成・Control Plane・パラメータ配送は提供しません。
 
-Python 3.13以上。配布名は`sigbus-worker`、import名は`worker`です。外部依存はありません。
-SigBusを使うアプリケーションは別途SigBusをインストールしてください。
+配布は`sigbus`ひとつです。Python 3.13以上が必要です。
+リポジトリ直下でインストール・検証します。
 
 ```sh
-python -m pip install -e ./worker
-python -m pytest -q -c worker/pyproject.toml worker/tests
+python -m pip install -e '.[test]'
+python -m pytest -q
 ```
 
 ## 配置と実行例
 
 ```python
-from worker import ModuleSpec, Periodic, RunResult, Stage, Worker
+from sigbus.worker import ModuleSpec, Periodic, RunResult, Stage, Worker
 
 class Counter:
     def initialize(self):
@@ -71,32 +73,39 @@ IDLE時にも前のModuleの取得・公開を取り消しません。
 厳密な1件単位の連動が必要なら、入力の識別や保持をModule側で行います。
 run_onceは有限な処理とし、無期限の取得待ちをしないでください。
 
-## Periodic / Event
+## Periodic / Event / Polling
 
 スケジュールはModuleごとではなくStageごとに指定します。
 
 - `Periodic(rate_hz)`：全Stageの初期化完了後の共通基準時刻から実行予定を計算します。
   初回は即時実行可能。Stage全体の処理終了時に過ぎた予定を飛ばします。
   処理時間を周期へ加算せず、単調時計を使います。
-- `Event(condition, interval=0.001)`：初期化後に`condition(stage)`を呼び、
+- `Polling(condition, interval=0.001)`：初期化後に`condition(stage)`を呼び、
   引数なしの判定関数を作ります。判定は待機・データ消費をせず、実行可能ならTrueを返します。
   確認後とStage実行後のいずれもinterval秒以上空けて確認します。
 
-Eventは通知件数を蓄積せず、条件が継続して成立していれば再び実行します。
+Pollingは条件が継続して成立していれば再び実行します。
+
+`Event()`は`worker.wake(stage_name)`の通知まで無期限に待ち、定期チェックしません。
+通知1回でStageを1パス実行し、再び待ちます。複数通知はまとめられます。
+初期化前の通知も保持し、処理中の通知は次の実行を要求します。停止は通知待ちを解除します。
+IDLEでも通知は消費するため、再試行が必要なら新しい通知が必要です。
+SigBusの公開が自動でwakeを呼ぶわけではありません。
+
+秒で周期を指定する場合は`Periodic(rate_hz=1 / seconds)`を使います。
 実行条件の決定はアプリケーションの責務です。
 
 ## SigBusとの接続
 
 ```python
-from worker import Event, ModuleSpec, RunResult, Stage, Worker
-from worker.adapters.sigbus import StreamReady
+from sigbus.worker import Polling, ModuleSpec, RunResult, Stage, Worker
 from sigbus import Bus, FileTransport, NoFrameAvailable, StreamSpec
 
 class Analysis:
     def initialize(self):
         self.transport = FileTransport(directory="/tmp/worker-demo")
         self.subscriber = Bus(self.transport).subscriber(
-            StreamSpec("input", (1024,), "f4"))
+            StreamSpec("input", (1024,), "f4", rate_hz=100))
 
     def run_once(self):
         try:
@@ -114,7 +123,7 @@ class Analysis:
 
 worker = Worker([
     Stage(name, [ModuleSpec("analysis", Analysis())],
-          Event(lambda stage: StreamReady(stage.module("analysis").subscriber)))
+          Polling(lambda stage: stage.module("analysis").subscriber.has_frame))
     for name in ("reader-a", "reader-b")
 ])
 # 別Publisherが同じStreamへ公開する想定。Ctrl+Cで終了。
@@ -127,9 +136,8 @@ worker.run()
 各Moduleのinitialize/run_once/finalizeはすべて、そのStageの同じスレッドで実行されます。
 Stage間で共有する独自の可変状態はアプリケーション側で同期してください。
 
-StreamReadyは公開APIのhas_frame()だけを呼びます。結果は予約ではなく、
-確認後に取得できない場合はModuleが扱います。Stateの更新検出には使用できません。
-Subscriberの種別は公開APIで判定できないため、自動検証はしません。
+判定関数はSubscriberの`has_frame`を直接渡します。確認は予約ではないため、
+取得できない場合はModuleが扱います。Stateの更新検出には使用できません。
 
 ## 起動・停止・異常時
 
@@ -163,17 +171,70 @@ Stageのprocessedは最後まで呼び出した回数（FINISHEDを含む）、i
 例外・停止で中断した回もexecutionsに含めます。実行中の読み出しは厳密に同期したスナップショットではありません。
 
 独自Scheduleは`bind(stage, start)`でStage専用のConditionを作ります。
-Workerは具体的なスケジュール型に依存しません。
+組み込みEventにはWorkerが通知を接続します。独自Scheduleは下記の契約を使います。
 
 | Condition | 契約 |
 |---|---|
-| ready(now) | 待たず、消費せず、実行可能か返す |
+| ready(now) | 待たずに実行可能か返す。入力データは消費しない（Eventは通知を消費） |
 | next_check() | 次の確認時刻を単調時計で返す |
 | after_run(finished_at) | Stage全体の終了後に予定を更新し、スキップ数を返す |
 
 通知型の条件は状態を更新してからworker.wake(stage_name)で対象Stageを起こせます。
 引数なしwake()は全Stageを起こします。通知待ちにはnext_checkで正の無限大を返します。
-wakeはPeriodic/Eventの予定時刻を早めません。通知はまとめられるため、条件自体を保持してください。
+wakeはPeriodic/Pollingの予定時刻を早めません。通知はまとめられるため、条件自体を保持してください。
 
 以前のWorker(modules)からWorker(stages)へ変更しています。
-ModuleSpecのscheduleは削除し、Stageへ移しました。EventのfactoryもModuleではなくStageを受け取ります。
+ModuleSpecのscheduleは削除し、Stageへ移しました。条件factoryはPollingへ移し、ModuleではなくStageを受け取ります。
+旧`Event(condition, interval)`は`Polling(condition, interval)`へ変更してください。
+新しい`Event()`は条件を取らない通知待ちです。
+
+## SigBus用Module
+
+`sigbus.module.Module`はSigBus用の処理基底クラスで、接続・資源管理・停止をまとめます。
+Workerは開始前に`bind_stop_event(event)`を呼び、Moduleが所有するNodeとendpointへ停止を伝えます。
+Workerは具象Moduleをimportせず、initialize/run_once/finalizeを持つオブジェクトを実行できます。
+Spec一覧を受け取り、名前でPublisher／Subscriberを作成できます。bindingsは使いません。
+APのwith acquireや手動checkoutを隠す処理コールバックは設けません。
+
+```python
+from sigbus.worker import RunResult
+from sigbus.module import Module
+
+class Filter(Module):
+    def initialize(self):
+        self.source = self.subscriber("signal")
+        self.output = self.publisher("filtered")
+        self.node = self.make_node(subscribers=(self.source,), publishers=(self.output,))
+
+    def run_once(self):
+        with self.node.acquire() as frames:
+            frames[self.output].payload[...] = frames[self.source].payload * 2
+        return RunResult.PROCESSED
+```
+
+複数周期で処理する場合はrun_once内でreserve/checkoutした領域を保持し、完成周期にcommit/completeします。
+中止時はabortです。初期化・取得・完成判定はAPに見える形で記述します。
+正常な有限生成を通知する前には`self.drain()`を呼び、True（端数も含めた公開完了）を確認します。
+停止された場合はFalseです。タイムアウト再試行のループは不要です。
+
+Worker.stopはModuleのNode／単独endpointの手動checkoutとdrainを中断できます。
+停止に伴うInterruptedErrorはWorkerの異常として扱いません。
+従来の単独endpointのwithをPollingWaitで待つ場合は、そのwaitにもstop_eventを設定してください。
+finalizeは未確定の手動作業をabortし、正常時にdrain/close、停止時にdiscardします。
+Node.closeが登録endpointも閉じるため、APがendpointとNodeの二重の終了リストを作る必要はありません。
+
+## ソース構成
+
+```text
+sigbus/
+├── module.py              # SigBus用Module・資源所有・終了処理
+└── worker/
+    ├── __init__.py        # 実行制御の公開API
+    ├── core.py            # Workerの起動・並行実行・協調停止
+    ├── stage.py           # ModuleSpec・Stage
+    ├── scheduling.py      # Periodic / Event / Polling
+    └── reporting.py       # RunResult・状態・統計
+```
+
+`from sigbus.module import Module`と`from sigbus.worker import Worker, Stage, ModuleSpec, RunResult`を使います。
+汎用Module基底クラス・SigBusアダプター・別配布パッケージは設けません。

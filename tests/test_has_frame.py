@@ -2,11 +2,11 @@ import copy
 
 import pytest
 
-from sigbus import Bus, FIFOPolicy, LatestPolicy, ReadCompletePolicy, PollingWait
+from sigbus import Bus, FIFOPolicy, LatestPolicy, SyncPolicy, PollingWait
 from test_transports import domain, publish
 
 
-@pytest.mark.parametrize('policy', [FIFOPolicy(), LatestPolicy(), ReadCompletePolicy(),
+@pytest.mark.parametrize('policy', [FIFOPolicy(), LatestPolicy(), SyncPolicy(),
                                     FIFOPolicy(wait=PollingWait(timeout=None))])
 def test_snapshot_does_not_consume_or_wait(domain, policy):
     transport, spec = domain

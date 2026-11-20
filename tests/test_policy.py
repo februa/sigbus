@@ -167,9 +167,9 @@ def test_exit_errors_are_not_retried():
 
 def test_immediate_and_closed_endpoint_behavior():
     transport = InProcessTransport()
-    spec = StreamSpec("x", (1,), "f8")
+    spec = StreamSpec("x", (1,), "f8", rate_hz=100)
     for i, policy in enumerate((None, LatestPolicy(wait=ImmediateWait()))):
-        spec = StreamSpec(f"x-{i}", (1,), "f8")
+        spec = StreamSpec(f"x-{i}", (1,), "f8", rate_hz=100)
         sub = Bus(transport, policy=policy).subscriber(spec)
         with pytest.raises(BlockingIOError):
             with sub.acquire():

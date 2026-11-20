@@ -1,94 +1,11 @@
 """Stage threads in one process; modules within each stage run sequentially."""
-from dataclasses import dataclass, field
-from enum import Enum
 import math
 import threading
 import time
 import traceback
-from typing import Protocol
 
-from .scheduling import Schedule
-
-
-class Module(Protocol):
-    def initialize(self) -> None: ...
-    def run_once(self) -> "RunResult": ...
-    def finalize(self) -> None: ...
-
-
-class RunResult(Enum):
-    PROCESSED = "processed"
-    IDLE = "idle"
-    FINISHED = "finished"
-
-
-class State(Enum):
-    NEW = "new"
-    STARTING = "starting"
-    READY = "ready"
-    RUNNING = "running"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
-    FAILED = "failed"
-
-
-@dataclass(frozen=True)
-class ModuleSpec:
-    name: str
-    module: Module
-
-    def __post_init__(self):
-        if not isinstance(self.name, str) or not self.name:
-            raise ValueError("name must be a nonempty string")
-        for method in ("initialize", "run_once", "finalize"):
-            if not callable(getattr(self.module, method, None)):
-                raise TypeError(f"module must provide {method}()")
-
-
-@dataclass(frozen=True)
-class Stage:
-    name: str
-    modules: tuple[ModuleSpec, ...]
-    schedule: Schedule
-
-    def __post_init__(self):
-        object.__setattr__(self, "modules", tuple(self.modules))
-        if not isinstance(self.name, str) or not self.name:
-            raise ValueError("stage name must be a nonempty string")
-        names = [spec.name for spec in self.modules]
-        if not names or len(names) != len(set(names)):
-            raise ValueError("stage requires modules with unique names")
-        if not callable(getattr(self.schedule, "bind", None)):
-            raise TypeError("schedule must provide bind(stage, start)")
-
-    def module(self, name: str) -> Module:
-        """Access a module when assembling an application-defined condition."""
-        for spec in self.modules:
-            if spec.name == name:
-                return spec.module
-        raise KeyError(name)
-
-
-@dataclass
-class Stats:
-    executions: int = 0
-    processed: int = 0
-    idle: int = 0
-    skipped: int = 0
-    processing_seconds: float = 0.0
-    max_processing_seconds: float = 0.0
-
-
-@dataclass
-class Report:
-    state: State = State.NEW
-    stats: Stats = field(default_factory=Stats)
-    errors: list[str] = field(default_factory=list)
-
-
-@dataclass
-class StageReport(Report):
-    modules: dict[str, Report] = field(default_factory=dict)
+from .reporting import Report, RunResult, StageReport, State
+from .scheduling import Event
 
 
 class WorkerError(RuntimeError):
@@ -114,9 +31,14 @@ class Worker:
         self.state = State.NEW
         self._stop = threading.Event()
         self._wakes = {stage.name: threading.Event() for stage in self.stages}
+        self._notifications = {stage.name: threading.Event() for stage in self.stages}
         self._run_lock = threading.Lock()
         self._error_lock = threading.Lock()
         self._failures = []
+        for module in modules:
+            bind_stop = getattr(module, "bind_stop_event", None)
+            if callable(bind_stop):
+                bind_stop(self._stop)
 
     def stop(self):
         """Stop future module calls and interrupt schedule waits, not active code."""
@@ -126,9 +48,11 @@ class Worker:
     def wake(self, stage=None):
         """Notify one stage, or all stages; condition state must already be updated."""
         if stage is None:
-            for event in self._wakes.values():
+            for name, event in self._wakes.items():
+                self._notifications[name].set()
                 event.set()
         else:
+            self._notifications[stage].set()
             self._wakes[stage].set()
 
     def _error(self, stage, module, exc):
@@ -172,7 +96,11 @@ class Worker:
             gate.wait()
             if self._stop.is_set():
                 return
-            condition = stage.schedule.bind(stage, epoch[0])
+            if isinstance(stage.schedule, Event):
+                condition = stage.schedule.bind(stage, epoch[0],
+                                                notification=self._notifications[stage.name])
+            else:
+                condition = stage.schedule.bind(stage, epoch[0])
             report.state = State.RUNNING
             wake = self._wakes[stage.name]
             while not self._stop.is_set():
@@ -219,7 +147,8 @@ class Worker:
                     delay = max(0, deadline - time.monotonic())
                     wake.wait(None if delay == math.inf else delay)
         except BaseException as exc:
-            self._error(stage, current, exc)
+            if not (isinstance(exc, InterruptedError) and self._stop.is_set()):
+                self._error(stage, current, exc)
         finally:
             report.state = State.STOPPING
             ready.set()  # release startup coordinator even when initialize failed
